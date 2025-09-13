@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-dotenv
+supabase
+openai
+requests
+python-jose[cryptography]
+xhtml2pdf
+markdown2
+pydantic[email]
