@@ -8,6 +8,7 @@ from app.services.credit_service import CreditService
 from app.services.paypal_service import PayPalService
 from app.services.user_service import UserService
 from app.api.deps import current_user
+from app.core.config import settings
 from app.domain.models import CreditPurchaseRequest, CreditPurchaseResponse
 from app.core.logging import get_logger
 from supabase import Client
@@ -53,7 +54,7 @@ async def purchase_credits(
         user_name = user_profile.get("full_name", "User")
         
         # Create PayPal order for credit purchase
-        base_url = "http://localhost:3000"
+        base_url = settings.FRONTEND_URL
         return_url = f"{base_url}/payment/success?type=credits"
         cancel_url = f"{base_url}/payment/cancelled?type=credits"
         

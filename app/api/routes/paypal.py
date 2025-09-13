@@ -10,6 +10,7 @@ from app.services.user_service import UserService
 from app.services.chapter_service import ChapterService
 from app.api.deps import current_user
 from app.core.logging import get_logger
+from app.core.config import settings
 from supabase import Client
 
 # Import the background task function from cart.py
@@ -70,7 +71,7 @@ async def create_payment_session(
         user_name = user_profile.get("full_name", "User")
 
         # In a real app, get base_url from config
-        base_url = "http://localhost:3000"
+        base_url = settings.FRONTEND_URL
         return_url = f"{base_url}/payment/success"
         cancel_url = f"{base_url}/payment/cancelled"
 

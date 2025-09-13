@@ -29,4 +29,7 @@ class Settings(BaseSettings):
 
     JOB_RUNNER_SECRET: str
 
+    BACKEND_URL: str = "api.mysaras.club"
+    FRONTEND_URL: str = "www.mysaras.club"
+
 settings = Settings()
