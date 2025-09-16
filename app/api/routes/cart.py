@@ -33,7 +33,6 @@ def get_chapter_service(
     """Dependency to provide a ChapterService instance."""
     return ChapterService(supabase=supabase, openai_client=openai_client)
 
-
 # --- Helper Functions ---
 
 async def handle_non_subscription_completion(
@@ -98,7 +97,7 @@ async def handle_non_subscription_completion(
             return
         
         # Get book title for PDF generation
-        book_title = "My Book"  # Default title
+        book_title = "SARAS eBook"  # Default title
         try:
             book_response = supabase.table("books").select("generated_title").eq("id", book_id).execute()
             if book_response.data and len(book_response.data) > 0 and book_response.data[0].get("generated_title"):
@@ -250,7 +249,6 @@ async def trigger_chapter_generation(
         log.error(f"[BG Task] CRITICAL: Failed to update final status for order {order_id}. Error: {e}", exc_info=True)
 
     log.info(f"[BG Task] Finished processing order_id: {order_id}.")
-
 
 # --- API Routes ---
 
