@@ -3,3 +3,7 @@
 test.ipynb
 docs/
 app.log
+.vscode
+**/.pytest_cache
+**/__pycache__
+**/*.pyc

@@ -406,3 +406,71 @@ class CartService:
         
         log.info(f"[CREDIT_CHECKOUT] Credit-based checkout completed successfully for order {order_id} for user_id: {user_id}")
         return updated_order_response.data
+
+    def store_cashfree_order_info(self, *, user_id: str, order_id: str, payment_session_id: str) -> None:
+        """Store Cashfree order information in the user's draft order."""
+        order = self._get_or_create_draft_order(user_id)
+        db_order_id = order["id"]
+        log.info(f"Storing Cashfree order info for db_order_id: {db_order_id}")
+        
+        # Store Cashfree order info in the order metadata
+        # self.sb.table("orders").update({
+        #     "cashfree_order_id": order_id,
+        #     "cashfree_payment_session_id": payment_session_id,
+        #     "payment_method": "cashfree"
+        # }).eq("id", db_order_id).execute()
+        
+        # Update direct_orders table
+        self.sb.table("direct_orders").update({
+            "gateway_order_id": order_id,
+            "payment_method": "cashfree",
+            "gateway_order_status": "pending"
+        }).eq("order_id", db_order_id).execute()
+        
+        log.info(f"Successfully stored Cashfree order info for db_order_id: {db_order_id}")
+
+    def update_cashfree_order_status(self, *, user_id: str, order_id: str, status: str) -> None:
+        """Update Cashfree order status in the database."""
+        log.info(f"Updating Cashfree order {order_id} status to {status}")
+        
+        # Update the order with the payment status
+        # self.sb.table("orders").update({
+        #     "cashfree_payment_status": status
+        # }).eq("cashfree_order_id", order_id).execute()
+        
+        # Update direct_orders table
+        self.sb.table("direct_orders").update({
+            "gateway_order_status": status
+        }).eq("gateway_order_id", order_id).execute()
+        
+        log.info(f"Successfully updated Cashfree order {order_id} status to {status}")
+
+    def get_order_by_cashfree_order_id(self, order_id: str) -> dict | None:
+        """Get order by Cashfree order ID."""
+        log.info(f"Looking up order by Cashfree order ID: {order_id}")
+        
+        # try:
+        #     order_res = self.sb.table("orders").select("*").eq("cashfree_order_id", order_id).single().execute()
+        #     if order_res.data:
+        #         log.info(f"Found order {order_res.data['id']} for Cashfree order {order_id}")
+        #         return order_res.data
+        #     else:
+        #         log.warning(f"No order found for Cashfree order {order_id}")
+        #         return None
+        # except Exception as e:
+        #     log.error(f"Error looking up order by Cashfree order ID {order_id}: {e}")
+        #     return None
+        try:
+            res = self.sb.table("direct_orders").select(
+                "*, order:orders(*)"
+            ).eq("gateway_order_id", order_id).single().execute()
+            if res.data and res.data.get("order"):
+                order_details = res.data.pop("order")
+                order_details.update(res.data)
+                return order_details
+            else:
+                log.warning(f"No order found for gateway ID {order_id}")
+                return None
+        except Exception as e:
+            log.error(f"Error looking up order by Cashfree order ID {order_id}: {e}")
+            return None
