@@ -35,5 +35,6 @@ class Settings(BaseSettings):
 
     CASHFREE_CLIENT_ID: str
     CASHFREE_CLIENT_SECRET: str
+    CASHFREE_BASE_URL: str = "https://api.cashfree.com"
 
 settings = Settings()
