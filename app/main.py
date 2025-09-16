@@ -12,6 +12,7 @@ from app.api.routes.orders import router as orders_router
 from app.api.routes.html_conversion import router as html_conversion_router
 from app.api.routes.paypal import router as paypal_router
 from app.api.routes.credits import router as credits_router
+from app.api.routes.cashfree import router as cashfree_router
 from app.api.routes.email import router as email_router
 from app.api.routes.pdf import router as pdf_router
 
@@ -33,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(html_conversion_router)
     app.include_router(paypal_router)
     app.include_router(credits_router)
+    app.include_router(cashfree_router)
     app.include_router(email_router)
     app.include_router(pdf_router)
     return app

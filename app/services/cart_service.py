@@ -206,9 +206,9 @@ class CartService:
                 except Exception as e:
                     log.error(f"Failed to update book status for book_id: {book_id}. Error: {e}", exc_info=True)
                     # Continue with checkout even if book status update fails
-        
-        updated_order_response = self.sb.table("orders").select("*, order_items(*)").eq("id", final_order_state["id"]).single().execute()
-        
+
+        updated_order_response = self.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", final_order_state["id"]).single().execute()
+
         log.info(f"Order {order_id} status successfully updated to 'pending' for user_id: {user_id}")
         return updated_order_response.data
 
@@ -224,7 +224,7 @@ class CartService:
             "paypal_subscription_id": subscription_id,
             "paypal_plan_id": plan_id,
             "payment_method": "paypal"
-        }).eq("id", order_id).execute()
+        }).eq("id", order_id).execute() # -- Flag
         
         log.info(f"Successfully stored PayPal subscription info for order_id: {order_id}")
 
@@ -260,17 +260,25 @@ class CartService:
         order = self._get_or_create_draft_order(user_id)
         db_order_id = order["id"]
         log.info(f"Storing PayPal order info for db_order_id: {db_order_id}")
-        self.sb.table("orders").update({
-            "paypal_order_id": order_id,
-            "payment_method": "paypal_onetime"
-        }).eq("id", db_order_id).execute()
+        self.sb.table("direct_orders").update({
+            "gateway_order_id": order_id,
+            "payment_method": "paypal"
+        }).eq("order_id", db_order_id).execute()
 
     def get_order_by_paypal_order_id(self, order_id: str) -> dict | None:
         """Get order by PayPal one-time order ID."""
         log.info(f"Looking up order by PayPal order ID: {order_id}")
         try:
-            order_res = self.sb.table("orders").select("*").eq("paypal_order_id", order_id).single().execute()
-            return order_res.data
+            res = self.sb.table("direct_orders").select(
+                "*, order:orders(*)"
+            ).eq("gateway_order_id", order_id).single().execute()
+            if res.data and res.data.get("order"):
+                order_details = res.data.pop("order")
+                order_details.update(res.data)
+                return order_details
+            else:
+                log.warning(f"No order found for gateway ID {order_id}")
+                return None
         except Exception as e:
             log.error(f"Error looking up order by PayPal order ID {order_id}: {e}")
             return None
@@ -373,9 +381,14 @@ class CartService:
         self.sb.table("orders").update({
             "status": "pending", 
             "time_to_send": time_to_send,
-            "payment_method": "credits"
         }).eq("id", final_order_state["id"]).execute()
-        
+        self.sb.table("direct_orders").insert({
+            "payment_method": "credits",
+            "order_id": final_order_state["id"],
+            "gateway_order_status": "completed",
+            "gateway_order_id": f"CREDITS-{final_order_state['id']}"
+        }).execute()
+
         # Update book status to 'pending' for all books in the order
         order_items = final_order_state.get("order_items", [])
         for item in order_items:
@@ -387,9 +400,77 @@ class CartService:
                 except Exception as e:
                     log.error(f"[CREDIT_CHECKOUT] Failed to update book status for book_id: {book_id}. Error: {e}", exc_info=True)
                     # Continue with checkout even if book status update fails
-        
-        updated_order_response = self.sb.table("orders").select("*, order_items(*)").eq("id", final_order_state["id"]).single().execute()
+
+        updated_order_response = self.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", final_order_state["id"]).single().execute()
         log.debug(f"[CREDIT_CHECKOUT] Final order response for order_id {order_id}: {updated_order_response}")
         
         log.info(f"[CREDIT_CHECKOUT] Credit-based checkout completed successfully for order {order_id} for user_id: {user_id}")
         return updated_order_response.data
+
+    def store_cashfree_order_info(self, *, user_id: str, order_id: str, payment_session_id: str) -> None:
+        """Store Cashfree order information in the user's draft order."""
+        order = self._get_or_create_draft_order(user_id)
+        db_order_id = order["id"]
+        log.info(f"Storing Cashfree order info for db_order_id: {db_order_id}")
+        
+        # Store Cashfree order info in the order metadata
+        # self.sb.table("orders").update({
+        #     "cashfree_order_id": order_id,
+        #     "cashfree_payment_session_id": payment_session_id,
+        #     "payment_method": "cashfree"
+        # }).eq("id", db_order_id).execute()
+        
+        # Update direct_orders table
+        self.sb.table("direct_orders").update({
+            "gateway_order_id": order_id,
+            "payment_method": "cashfree",
+            "gateway_order_status": "pending"
+        }).eq("order_id", db_order_id).execute()
+        
+        log.info(f"Successfully stored Cashfree order info for db_order_id: {db_order_id}")
+
+    def update_cashfree_order_status(self, *, user_id: str, order_id: str, status: str) -> None:
+        """Update Cashfree order status in the database."""
+        log.info(f"Updating Cashfree order {order_id} status to {status}")
+        
+        # Update the order with the payment status
+        # self.sb.table("orders").update({
+        #     "cashfree_payment_status": status
+        # }).eq("cashfree_order_id", order_id).execute()
+        
+        # Update direct_orders table
+        self.sb.table("direct_orders").update({
+            "gateway_order_status": status
+        }).eq("gateway_order_id", order_id).execute()
+        
+        log.info(f"Successfully updated Cashfree order {order_id} status to {status}")
+
+    def get_order_by_cashfree_order_id(self, order_id: str) -> dict | None:
+        """Get order by Cashfree order ID."""
+        log.info(f"Looking up order by Cashfree order ID: {order_id}")
+        
+        # try:
+        #     order_res = self.sb.table("orders").select("*").eq("cashfree_order_id", order_id).single().execute()
+        #     if order_res.data:
+        #         log.info(f"Found order {order_res.data['id']} for Cashfree order {order_id}")
+        #         return order_res.data
+        #     else:
+        #         log.warning(f"No order found for Cashfree order {order_id}")
+        #         return None
+        # except Exception as e:
+        #     log.error(f"Error looking up order by Cashfree order ID {order_id}: {e}")
+        #     return None
+        try:
+            res = self.sb.table("direct_orders").select(
+                "*, order:orders(*)"
+            ).eq("gateway_order_id", order_id).single().execute()
+            if res.data and res.data.get("order"):
+                order_details = res.data.pop("order")
+                order_details.update(res.data)
+                return order_details
+            else:
+                log.warning(f"No order found for gateway ID {order_id}")
+                return None
+        except Exception as e:
+            log.error(f"Error looking up order by Cashfree order ID {order_id}: {e}")
+            return None

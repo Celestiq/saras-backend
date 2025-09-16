@@ -341,7 +341,8 @@ class PayPalService:
         if one_time_items:
             log.debug(f"PayPalService: One-time items: {one_time_items}")
         
-        return subscription_total, setup_fee
+        log.info("Returning Subscription total as 0.0 and Setup fee as total cart value for PayPal processing")
+        return 0.0, setup_fee + subscription_total
     
     async def create_order(
         self,

@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 from app.db.supabase import get_supabase
 from app.services.credit_service import CreditService
 from app.services.paypal_service import PayPalService
+from app.services.cashfree_service import CashfreeService
 from app.services.user_service import UserService
 from app.api.deps import current_user
 from app.core.config import settings
@@ -25,6 +26,10 @@ def get_credit_service(supabase: Client = Depends(get_supabase)) -> CreditServic
 def get_paypal_service() -> PayPalService:
     """Dependency to provide a PayPalService instance."""
     return PayPalService()
+
+def get_cashfree_service() -> CashfreeService:
+    """Dependency to provide a CashfreeService instance."""
+    return CashfreeService()
 
 def get_user_service(supabase: Client = Depends(get_supabase)) -> UserService:
     """Dependency to provide a UserService instance."""
@@ -94,6 +99,76 @@ async def purchase_credits(
             detail="Failed to initiate credit purchase"
         )
 
+@router.post("/purchase-cashfree", response_model=CreditPurchaseResponse, summary="Purchase credits using Cashfree")
+async def purchase_credits_cashfree(
+    request: CreditPurchaseRequest,
+    user: dict = Depends(current_user),
+    credit_service: CreditService = Depends(get_credit_service),
+    cashfree_service: CashfreeService = Depends(get_cashfree_service),
+    user_service: UserService = Depends(get_user_service)
+):
+    """
+    Purchase credits using Cashfree payment.
+    Creates a Cashfree order and returns the payment session ID for payment.
+    """
+    user_id = user.get("id")
+    log.info(f"User {user_id} purchasing {request.credits} credits for ${request.price} via Cashfree")
+    
+    try:
+        # Get user profile for Cashfree customer details
+        user_profile = user_service.get_user_profile(user_id)
+        user_email = user_profile.get("email", "")
+        user_name = user_profile.get("full_name", "User")
+        
+        # Prepare customer details for Cashfree
+        customer_details = {
+            "customer_id": user_id,
+            "customer_name": user_name,
+            "customer_email": user_email,
+            "customer_phone": "9999999999"  # Placeholder phone number
+        }
+        
+        # Set up return URL
+        base_url = settings.FRONTEND_URL
+        return_url = f"{base_url}/payment/success?type=credits&gateway=cashfree"
+        
+        # Create Cashfree order
+        order_id, payment_session_id = await cashfree_service.create_order(
+            order_amount=request.price,
+            customer_details=customer_details,
+            return_url=return_url
+        )
+        
+        # Create credit purchase record
+        purchase_record = credit_service.create_credit_purchase_record(
+            user_id=user_id,
+            package_id=request.package_id,
+            credits=request.credits,
+            price=request.price,
+            payment_type="cashfree_order",
+            payment_id=order_id
+        )
+        
+        log.info(f"Successfully created Cashfree credit purchase session for user {user_id}. Order ID: {order_id}")
+        
+        return CreditPurchaseResponse(
+            status="pending",
+            message="Credit purchase initiated. Please complete payment on Cashfree.",
+            payment_type="order",
+            approval_url=f"{payment_session_id}",
+            order_id=order_id
+        )
+        
+    except HTTPException as e:
+        log.error(f"HTTP error during Cashfree credit purchase for user {user_id}: {e.detail}")
+        raise e
+    except Exception as e:
+        log.error(f"Unexpected error during Cashfree credit purchase for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to initiate Cashfree credit purchase"
+        )
+
 @router.post("/capture-purchase/{order_id}", summary="Capture payment and add credits to user account")
 async def capture_credit_purchase(
     order_id: str,
@@ -154,6 +229,76 @@ async def capture_credit_purchase(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to capture credit purchase"
+        )
+
+@router.post("/verify-cashfree-purchase/{order_id}", summary="Verify Cashfree payment and add credits to user account")
+async def verify_cashfree_credit_purchase(
+    order_id: str,
+    user: dict = Depends(current_user),
+    cashfree_service: CashfreeService = Depends(get_cashfree_service),
+    credit_service: CreditService = Depends(get_credit_service)
+):
+    """
+    Verify the Cashfree payment and add the purchased credits to the user's account.
+    """
+    user_id = user.get("id")
+    log.info(f"User {user_id} verifying Cashfree credit purchase for order {order_id}")
+    
+    try:
+        # Verify payment with Cashfree
+        order_data = await cashfree_service.verify_order(order_id)
+        order_status = order_data.get("order_status")
+        log.debug(f"Cashfree order {order_id} status: {order_status}")
+        
+        if order_status == "PAID":
+            # Payment is successful, get the credit purchase record
+            purchase_record_res = credit_service.sb.table("credit_purchases").select("*").eq("payment_id", order_id).eq("user_id", user_id).single().execute()
+            
+            if not purchase_record_res.data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Credit purchase record not found"
+                )
+            
+            purchase_record = purchase_record_res.data
+            credits_to_add = purchase_record["credits"]
+            
+            # Add credits to user account
+            credit_update = credit_service.add_credits(user_id, credits_to_add)
+            
+            # Update purchase record status
+            credit_service.update_credit_purchase_status(order_id, "completed")
+            
+            log.info(f"Successfully completed Cashfree credit purchase for user {user_id}. Added {credits_to_add} credits")
+            
+            return {
+                "status": "success",
+                "message": f"Payment verified successfully. {credits_to_add} credits added to your account.",
+                "credits_added": credits_to_add,
+                "new_balance": credit_update["new_balance"],
+                "payment_details": order_data
+            }
+        else:
+            status = order_status
+            log.warning(f"Cashfree payment verification failed with status: {status}")
+            
+            # Update purchase record status even if not paid yet
+            credit_service.update_credit_purchase_status(order_id, status.lower())
+            
+            return {
+                "status": "pending",
+                "message": f"Payment status: {status}",
+                "payment_details": order_data
+            }
+            
+    except HTTPException as e:
+        log.error(f"HTTP error verifying Cashfree credit purchase for user {user_id}: {e.detail}")
+        raise e
+    except Exception as e:
+        log.error(f"Unexpected error verifying Cashfree credit purchase for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify Cashfree credit purchase"
         )
 
 @router.get("/balance", summary="Get current user's credit balance")

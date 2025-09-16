@@ -19,7 +19,7 @@ class OrderService:
             # This query fetches all orders for the user and, for each order,
             # it fetches the associated 'order_items' and the 'title' from the related 'books' table.
             orders_res = self.sb.table("orders").select(
-                "*, items:order_items(*, book:books(generated_title))"
+                "*, items:order_items(*, book:books(generated_title)), direct_orders(*)"
             ).eq("user_id", user_id).order("created_at", desc=True).execute()
             
             log.info(f"Successfully fetched {len(orders_res.data)} orders for user_id: {user_id}")
@@ -37,7 +37,7 @@ class OrderService:
         log.info(f"Fetching order {order_id} for user_id: {user_id}")
         try:
             order_res = self.sb.table("orders").select(
-                "*, items:order_items(*, book:books(generated_title))"
+                "*, items:order_items(*, book:books(generated_title)), direct_orders(*)"
             ).eq("id", order_id).eq("user_id", user_id).maybe_single().execute()
             
             if order_res.data:
