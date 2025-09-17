@@ -68,6 +68,7 @@ class DailyEmailService:
         chapter_idx = subscription_data.get("chapter_idx")
         content_path = subscription_data.get("content_path") 
         chapter_id = subscription_data.get("chapter_id")
+        username = subscription_data.get("username")
 
         log.info(f"Processing email for {recipient_email} - Book: '{book_title}', Chapter: {chapter_idx}")
 
@@ -90,7 +91,8 @@ class DailyEmailService:
             html_body = raw_content.decode('utf-8')
 
             # 2. Send the email
-            subject = f"{book_title} - Day {chapter_idx}: {chapter_title}"
+            subject = f"Hi {username if username else 'there'} | {book_title} - Day {chapter_idx}: {chapter_title}"
+
             self.email_service.send_simple_email(
                 recipient_email=recipient_email,
                 subject=subject,
@@ -122,8 +124,15 @@ class DailyEmailService:
         
         for subscription in subscriptions_to_process:
             result = self._prepare_and_send_email(subscription)
+            
             if result["status"] == "success":
                 success_count += 1
+                log.info(f"Updating subscription progress for item_id {subscription['order_item_id']}")
+
+                self.sb.rpc(
+                    'update_subscription_after_sending',
+                    {'item_id': subscription['order_item_id']}
+                ).execute()
             else:
                 failure_count += 1
 
@@ -137,14 +146,3 @@ class DailyEmailService:
             "failed": failure_count,
             "total": total_processed
         }
-    
-if __name__ == "__main__":
-    daily_email_service = DailyEmailService(supabase=get_supabase())
-
-    query_response = daily_email_service._get_daily_subscriptions()
-    print(f"Query response: {query_response}")
-
-    mail_response = daily_email_service.run_daily_email_workflow()
-    print(f"Mail response: {mail_response}")
-
-
