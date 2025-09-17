@@ -65,9 +65,9 @@ async def create_payment_session(
             raise HTTPException(status_code=400, detail="Cart is empty")
         
         # Create direct order record
-        cart_service.sb.table("direct_orders").insert({
-            "order_id": cart["id"]
-        }).execute()
+        # cart_service.sb.table("direct_orders").insert({
+        #     "order_id": cart["id"]
+        # }).execute()
         
         # Calculate total amount for all cart items
         total_amount = cashfree_service.calculate_cart_totals(cart["items"])

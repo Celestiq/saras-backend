@@ -62,9 +62,9 @@ async def create_payment_session(
         cart = cart_service.get_cart(user_id=user_id)
         if not cart or not cart.get("items"):
             raise HTTPException(status_code=400, detail="Cart is empty")
-        cart_service.sb.table("direct_orders").insert({
-            "order_id": cart["id"]
-        }).execute()
+        # cart_service.sb.table("direct_orders").insert({
+        #     "order_id": cart["id"]
+        # }).execute()
 
         subscription_total, one_time_total = paypal_service.calculate_cart_totals(cart["items"])
         has_subscriptions = subscription_total > 0
@@ -108,6 +108,7 @@ async def create_payment_session(
                 return_url=return_url,
                 cancel_url=cancel_url
             )
+            
             cart_service.store_paypal_order_info(user_id=user_id, order_id=order_id)
             return {"payment_type": "order", "order_id": order_id, "approval_url": approval_url}
     except Exception as e:
@@ -246,15 +247,19 @@ async def capture_paypal_order(
         capture_data = await paypal_service.capture_order(order_id)
         log.info(f"PayPal order {order_id} capture response: {capture_data}")
         if capture_data.get("status") == "COMPLETED":
-            db_order_id = order_from_db["order_id"]
-            log.debug(f"PayPal order {order_id} captured successfully, updating local order {db_order_id}")
-            cart_service.sb.table("orders").update({"status": "pending"}).eq("id", db_order_id).execute()
-            cart_service.sb.table("direct_orders").update({
-                "gateway_order_status": "completed"
-            }).eq("order_id", db_order_id).execute() 
-            updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
-            background_tasks.add_task(trigger_chapter_generation, order=updated_order.data, chapter_service=chapter_service, supabase=supabase)
-            return {"status": "success", "message": "Payment captured.", "order": updated_order.data}
+            log.info(f"PayPal order {order_id} captured successfully, updating local order status")
+            try:
+                db_order_id = order_from_db["order_id"]
+                log.debug(f"Updating local order {db_order_id}")
+                cart_service.sb.table("orders").update({"status": "pending"}).eq("id", db_order_id).execute()
+                cart_service.sb.table("direct_orders").update({
+                    "gateway_order_status": "completed"
+                }).eq("order_id", db_order_id).execute() 
+                updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
+                background_tasks.add_task(trigger_chapter_generation, order=updated_order.data, chapter_service=chapter_service, supabase=supabase)
+                return {"status": "success", "message": "Payment captured.", "order": updated_order.data}
+            except Exception as e:
+                log.error(f"Error updating order {db_order_id} after successful PayPal capture: {e}", exc_info=True)
         else:
             status = capture_data.get("status", "unknown")
             raise HTTPException(status_code=400, detail=f"Payment capture failed with status: {status}")

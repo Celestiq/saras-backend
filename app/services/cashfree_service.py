@@ -6,6 +6,8 @@ from app.core.logging import get_logger
 
 log = get_logger(__name__)
 
+USD_CONVERSION_FACTOR = 75
+
 class CashfreeService:
     def __init__(self):
         log.info("CashfreeService: Initializing Cashfree service")
@@ -61,7 +63,7 @@ class CashfreeService:
         headers = self._get_headers()
         
         payload = {
-            "order_amount": order_amount * 88,
+            "order_amount": order_amount * USD_CONVERSION_FACTOR,
             "order_currency": order_currency,
             "customer_details": customer_details,
             "order_meta": {
