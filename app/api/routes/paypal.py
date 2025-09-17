@@ -14,7 +14,7 @@ from app.core.config import settings
 from supabase import Client
 
 # Import the background task function from cart.py
-from app.api.routes.cart import trigger_chapter_generation
+from app.api.routes.cart import trigger_chapter_generation_sync
 
 log = get_logger(__name__)
 
@@ -186,7 +186,7 @@ async def verify_paypal_subscription(
             
             # Trigger background task for content generation
             background_tasks.add_task(
-                trigger_chapter_generation,
+                trigger_chapter_generation_sync,
                 order=updated_order.data,
                 chapter_service=chapter_service,
                 supabase=supabase
@@ -256,7 +256,7 @@ async def capture_paypal_order(
                     "gateway_order_status": "completed"
                 }).eq("order_id", db_order_id).execute() 
                 updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
-                background_tasks.add_task(trigger_chapter_generation, order=updated_order.data, chapter_service=chapter_service, supabase=supabase)
+                background_tasks.add_task(trigger_chapter_generation_sync, order=updated_order.data, chapter_service=chapter_service, supabase=supabase)
                 return {"status": "success", "message": "Payment captured.", "order": updated_order.data}
             except Exception as e:
                 log.error(f"Error updating order {db_order_id} after successful PayPal capture: {e}", exc_info=True)

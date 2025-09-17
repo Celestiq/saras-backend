@@ -13,7 +13,7 @@ from app.core.config import settings
 from supabase import Client
 
 # Import the background task function from cart.py
-from app.api.routes.cart import trigger_chapter_generation
+from app.api.routes.cart import trigger_chapter_generation_sync
 
 log = get_logger(__name__)
 
@@ -195,12 +195,12 @@ async def verify_cashfree_payment(
             
             # Trigger background task for content generation
             background_tasks.add_task(
-                trigger_chapter_generation,
+                trigger_chapter_generation_sync,
                 order=updated_order.data,
                 chapter_service=chapter_service,
                 supabase=supabase
             )
-            
+            log.info("Went through background task addition")
             log.info(f"Enqueued chapter generation task for order_id: {db_order_id}")
             
             return {
