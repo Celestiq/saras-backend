@@ -176,17 +176,12 @@ async def verify_cashfree_payment(
             
             db_order_id = order["order_id"]
             log.info(f"Updating order {db_order_id} status to 'pending' for content generation")
-            
+
             # Update order status to 'pending' for content generation
             cart_service.sb.table("orders").update({
                 "status": "pending",
                 "time_to_send": "07:00"
             }).eq("id", db_order_id).execute()
-            
-            # Update direct_orders table
-            # cart_service.sb.table("direct_orders").update({
-            #     "gateway_order_status": "completed"
-            # }).eq("order_id", db_order_id).execute()
             
             # Get the updated order with items
             updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
@@ -220,7 +215,7 @@ async def verify_cashfree_payment(
             )
             
             return {
-                "status": "pending",
+                "status": "active",
                 "message": f"Payment status: {order_status}",
                 "payment_details": order_data
             }

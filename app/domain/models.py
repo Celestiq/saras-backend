@@ -177,3 +177,7 @@ class ChapterInfo(BaseModel):
     id: str
     index: int
     book_id: str
+
+class SubscriptionRequest(BaseModel):
+    """Request model for managing subscriptions."""
+    item_id: str

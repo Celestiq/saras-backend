@@ -424,7 +424,7 @@ class CartService:
             "order_id": db_order_id,
             "gateway_order_id": order_id,
             "payment_method": "cashfree",
-            "gateway_order_status": "pending"
+            "gateway_order_status": "active"
         }).execute()
 
         log.info(f"Successfully stored Cashfree order info for db_order_id: {db_order_id}")

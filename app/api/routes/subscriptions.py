@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Optional
 from app.db.supabase import get_supabase
 from app.api.deps import current_user
 from app.core.logging import get_logger
+from app.domain.models import SubscriptionRequest
 
 # Instantiate the logger for this specific module
 log = get_logger(__name__)
@@ -43,9 +44,11 @@ def get_user_subscriptions_and_orders(
             created_at,
             items:order_items!inner(
                 subscription,
+                id,
+                unit_price,
                 book:books(generated_title)
             )
-        """).eq("user_id", user_id).eq("status", "completed").eq("items.subscription", False).execute()
+        """).eq("user_id", user_id).eq("status", "completed").execute()
         
         log.info(f"Successfully fetched {len(subscriptions_res.data)} subscriptions and {len(history_res.data)} order history items for user_id: {user_id}")
         
@@ -63,7 +66,7 @@ def get_user_subscriptions_and_orders(
 
 @router.post("/pause", summary="Pause a subscription")
 def pause_subscription(
-    item_id: str,
+    request: SubscriptionRequest,
     user: dict = Depends(current_user),
     supabase: Client = Depends(get_supabase)
 ) -> Dict[str, Any]:
@@ -71,6 +74,7 @@ def pause_subscription(
     Pauses an active subscription. The item_id is the UUID of the record in the order_items table.
     """
     user_id = user["id"]
+    item_id = request.item_id
     log.info(f"Pausing subscription for item_id: {item_id}, user_id: {user_id}")
     
     try:
@@ -116,7 +120,7 @@ def pause_subscription(
 
 @router.post("/resume", summary="Resume a paused subscription")
 def resume_subscription(
-    item_id: str,
+    request: SubscriptionRequest,
     user: dict = Depends(current_user),
     supabase: Client = Depends(get_supabase)
 ) -> Dict[str, Any]:
@@ -125,6 +129,7 @@ def resume_subscription(
     the subscription_progress_offset accordingly.
     """
     user_id = user["id"]
+    item_id = request.item_id
     log.info(f"Resuming subscription for item_id: {item_id}, user_id: {user_id}")
     
     try:
@@ -178,7 +183,7 @@ def resume_subscription(
 
 @router.post("/cancel", summary="Cancel a subscription")
 def cancel_subscription(
-    item_id: str,
+    request: SubscriptionRequest,
     user: dict = Depends(current_user),
     supabase: Client = Depends(get_supabase)
 ) -> Dict[str, str]:
@@ -186,6 +191,7 @@ def cancel_subscription(
     Permanently cancels a subscription.
     """
     user_id = user["id"]
+    item_id = request.item_id
     log.info(f"Cancelling subscription for item_id: {item_id}, user_id: {user_id}")
     
     try:
