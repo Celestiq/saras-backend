@@ -18,7 +18,7 @@ from app.api.routes.pdf import router as pdf_router
 from app.api.routes.subscriptions import router as subscriptions_router
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Saras Backend", version="0.1.0")
+    app = FastAPI(title="Saras Backend", version="0.1.0", redirect_slashes=False)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"], allow_credentials=True,

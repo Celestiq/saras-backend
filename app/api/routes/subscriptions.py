@@ -14,7 +14,7 @@ log = get_logger(__name__)
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
-@router.get("/", summary="Get user subscriptions and order history")
+@router.get("", summary="Get user subscriptions and order history")
 def get_user_subscriptions_and_orders(
     user: dict = Depends(current_user),
     supabase: Client = Depends(get_supabase)
