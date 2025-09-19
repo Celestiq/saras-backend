@@ -462,3 +462,49 @@ class CartService:
         except Exception as e:
             log.error(f"Error looking up order by Cashfree order ID {order_id}: {e}")
             return None
+
+    def update_direct_order_error(self, *, gateway_order_id: str = None, order_id: str = None, error_message: str) -> None:
+        """Update direct_orders table to set gateway_order_status to 'error' and store error info."""
+        log.error(f"Recording payment error: {error_message}")
+        
+        try:
+            update_data = {
+                "gateway_order_status": "error",
+                "info": error_message
+            }
+            
+            if gateway_order_id:
+                log.info(f"Updating direct_orders error status for gateway_order_id: {gateway_order_id}")
+                self.sb.table("direct_orders").update(update_data).eq("gateway_order_id", gateway_order_id).execute()
+            elif order_id:
+                log.info(f"Updating direct_orders error status for order_id: {order_id}")
+                self.sb.table("direct_orders").update(update_data).eq("order_id", order_id).execute()
+            else:
+                log.error("Either gateway_order_id or order_id must be provided to update error status")
+                return
+                
+            log.info(f"Successfully recorded payment error in direct_orders table")
+            
+        except Exception as e:
+            log.error(f"Failed to update direct_orders with error status: {e}", exc_info=True)
+
+    def create_direct_order_with_error(self, *, order_id: str, payment_method: str, error_message: str, gateway_order_id: str = None) -> None:
+        """Create a direct_orders record with error status when payment creation fails."""
+        log.error(f"Creating direct_orders record with error status: {error_message}")
+        
+        try:
+            insert_data = {
+                "order_id": order_id,
+                "payment_method": payment_method,
+                "gateway_order_status": "error",
+                "info": error_message
+            }
+            
+            if gateway_order_id:
+                insert_data["gateway_order_id"] = gateway_order_id
+            
+            self.sb.table("direct_orders").insert(insert_data).execute()
+            log.info(f"Successfully created direct_orders record with error status for order_id: {order_id}")
+            
+        except Exception as e:
+            log.error(f"Failed to create direct_orders record with error status: {e}", exc_info=True)

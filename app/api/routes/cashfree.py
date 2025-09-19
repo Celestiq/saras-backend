@@ -12,7 +12,6 @@ from app.core.logging import get_logger
 from app.core.config import settings
 from supabase import Client
 
-# Import the background task function from cart.py
 from app.api.routes.cart import trigger_chapter_generation_sync
 
 log = get_logger(__name__)
@@ -59,15 +58,15 @@ async def create_payment_session(
     user_id = user.get("id")
     log.info(f"User {user_id} creating Cashfree payment session")
     
+    order = None
     try:
         cart = cart_service.get_cart(user_id=user_id)
         if not cart or not cart.get("items"):
             raise HTTPException(status_code=400, detail="Cart is empty")
         
-        # Create direct order record
-        # cart_service.sb.table("direct_orders").insert({
-        #     "order_id": cart["id"]
-        # }).execute()
+        # Get the draft order for error recording
+        order = cart_service._get_or_create_draft_order(user_id)
+        order_id_for_error = order["id"]
         
         # Calculate total amount for all cart items
         total_amount = cashfree_service.calculate_cart_totals(cart["items"])
@@ -93,18 +92,39 @@ async def create_payment_session(
         
         # Create Cashfree order
         log.info(f"Initiating Cashfree order creation. Total: ${total_amount}")
-        order_id, payment_session_id = await cashfree_service.create_order(
-            order_amount=total_amount,
-            customer_details=customer_details,
-            return_url=return_url
-        )
+        try:
+            order_id, payment_session_id = await cashfree_service.create_order(
+                order_amount=total_amount,
+                customer_details=customer_details,
+                return_url=return_url
+            )
+        except Exception as order_error:
+            error_message = f"Cashfree order creation failed: {str(order_error)}"
+            log.error(f"Cashfree order creation error for user {user_id}: {error_message}", exc_info=True)
+            cart_service.create_direct_order_with_error(
+                order_id=order_id_for_error,
+                payment_method="cashfree",
+                error_message=error_message
+            )
+            raise HTTPException(status_code=500, detail="Failed to create Cashfree payment session")
         
         # Store Cashfree order information
-        cart_service.store_cashfree_order_info(
-            user_id=user_id,
-            order_id=order_id,
-            payment_session_id=payment_session_id
-        )
+        try:
+            cart_service.store_cashfree_order_info(
+                user_id=user_id,
+                order_id=order_id,
+                payment_session_id=payment_session_id
+            )
+        except Exception as store_error:
+            error_message = f"Failed to store Cashfree order info: {str(store_error)}"
+            log.error(f"Error storing Cashfree order info for user {user_id}: {error_message}", exc_info=True)
+            cart_service.create_direct_order_with_error(
+                order_id=order_id_for_error,
+                payment_method="cashfree",
+                error_message=error_message,
+                gateway_order_id=order_id
+            )
+            raise HTTPException(status_code=500, detail="Failed to create Cashfree payment session")
         
         return {
             "payment_type": "order",
@@ -114,8 +134,21 @@ async def create_payment_session(
             "currency": "INR"
         }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions as they are already handled
+        raise
     except Exception as e:
-        log.error(f"Error during Cashfree payment session creation for user {user_id}: {e}", exc_info=True)
+        error_message = f"Unexpected error during Cashfree payment session creation: {str(e)}"
+        log.error(f"Error during Cashfree payment session creation for user {user_id}: {error_message}", exc_info=True)
+        
+        # Record error if we have an order
+        if order:
+            cart_service.create_direct_order_with_error(
+                order_id=order["id"],
+                payment_method="cashfree",
+                error_message=error_message
+            )
+        
         raise HTTPException(status_code=500, detail="Failed to create Cashfree payment session")
 
 @router.post("/verify-payment/{order_id}", summary="Verify Cashfree payment status")
@@ -149,62 +182,109 @@ async def verify_cashfree_payment(
     log.info(f"Verifying payment for user: {user_name}")
     
     try:
-        # Verify payment with Cashfree
-        order_data = await cashfree_service.verify_order(order_id)
-        order_status = order_data.get("order_status")
-        log.debug(f"Cashfree order {order_id} status: {order_status}")
+        try:
+            order_data = await cashfree_service.verify_order(order_id)
+            order_status = order_data.get("order_status")
+            log.debug(f"Cashfree order {order_id} status: {order_status}")
+        except Exception as verify_error:
+            error_message = f"Cashfree payment verification failed: {str(verify_error)}"
+            log.error(f"Cashfree verification error for order {order_id}: {error_message}", exc_info=True)
+            cart_service.update_direct_order_error(
+                gateway_order_id=order_id,
+                error_message=error_message
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to verify Cashfree payment"
+            )
         
         if order_status == "PAID":
             # Payment is successful, update order status
             log.info(f"Cashfree payment {order_id} is successful, updating order status")
             
-            # Update Cashfree order status in database
-            cart_service.update_cashfree_order_status(
-                user_id=user_id,
-                order_id=order_id,
-                status="completed"
-            )
-            
-            # Get the order by Cashfree order ID
-            order = cart_service.get_order_by_cashfree_order_id(order_id)
-            if not order:
-                log.error(f"No order found for Cashfree order {order_id}")
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Order not found for this payment"
+            try:
+                # Update Cashfree order status in database
+                cart_service.update_cashfree_order_status(
+                    user_id=user_id,
+                    order_id=order_id,
+                    status="completed"
                 )
-            
-            db_order_id = order["order_id"]
-            log.info(f"Updating order {db_order_id} status to 'pending' for content generation")
+                
+                # Get the order by Cashfree order ID
+                order = cart_service.get_order_by_cashfree_order_id(order_id)
+                if not order:
+                    error_message = f"No order found for Cashfree order {order_id}"
+                    log.error(error_message)
+                    cart_service.update_direct_order_error(
+                        gateway_order_id=order_id,
+                        error_message=error_message
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Order not found for this payment"
+                    )
+                
+                db_order_id = order["order_id"]
+                log.info(f"Updating order {db_order_id} status to 'pending' for content generation")
 
-            # Update order status to 'pending' for content generation
-            cart_service.sb.table("orders").update({
-                "status": "pending",
-                "time_to_send": "07:00"
-            }).eq("id", db_order_id).execute()
-            
-            # Get the updated order with items
-            updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
-            
-            log.info(f"Successfully updated order {db_order_id} to 'pending' status")
-            
-            # Trigger background task for content generation
-            background_tasks.add_task(
-                trigger_chapter_generation_sync,
-                order=updated_order.data,
-                chapter_service=chapter_service,
-                supabase=supabase
+                # Update order status to 'pending' for content generation
+                cart_service.sb.table("orders").update({
+                    "status": "pending",
+                    "time_to_send": "07:00"
+                }).eq("id", db_order_id).execute()
+                
+                # Get the updated order with items
+                updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
+                
+                log.info(f"Successfully updated order {db_order_id} to 'pending' status")
+                
+                # Trigger background task for content generation
+                background_tasks.add_task(
+                    trigger_chapter_generation_sync,
+                    order=updated_order.data,
+                    chapter_service=chapter_service,
+                    supabase=supabase
+                )
+                log.info("Went through background task addition")
+                log.info(f"Enqueued chapter generation task for order_id: {db_order_id}")
+                
+                return {
+                    "status": "success",
+                    "message": "Payment verified and order processed successfully. Content generation has started.",
+                    "order": updated_order.data,
+                    "payment_details": order_data
+                }
+                
+            except HTTPException:
+                # Re-raise HTTP exceptions
+                raise
+            except Exception as processing_error:
+                error_message = f"Error processing successful Cashfree payment: {str(processing_error)}"
+                log.error(f"Error processing Cashfree payment {order_id}: {error_message}", exc_info=True)
+                cart_service.update_direct_order_error(
+                    gateway_order_id=order_id,
+                    error_message=error_message
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Payment was successful but order processing failed"
+                )
+        elif order_status in ["FAILED", "CANCELLED", "EXPIRED"]:
+            # Payment failed, update error status
+            error_message = f"Cashfree payment {order_status.lower()}: {order_data.get('order_note', 'No additional details')}"
+            log.warning(f"Cashfree payment {order_id} failed with status {order_status}")
+            cart_service.update_direct_order_error(
+                gateway_order_id=order_id,
+                error_message=error_message
             )
-            log.info("Went through background task addition")
-            log.info(f"Enqueued chapter generation task for order_id: {db_order_id}")
             
             return {
-                "status": "success",
-                "message": "Payment verified and order processed successfully. Content generation has started.",
-                "order": updated_order.data,
+                "status": "failed",
+                "message": f"Payment {order_status.lower()}",
                 "payment_details": order_data
             }
         else:
+            # Payment still in progress
             log.warning(f"Cashfree payment {order_id} status is {order_status}")
             
             # Update payment status even if not paid yet
@@ -224,7 +304,12 @@ async def verify_cashfree_payment(
         log.error(f"HTTP error verifying Cashfree payment for user {user_id}: {e.detail}")
         raise e
     except Exception as e:
-        log.error(f"Unexpected error verifying Cashfree payment for user {user_id}: {e}", exc_info=True)
+        error_message = f"Unexpected error verifying Cashfree payment: {str(e)}"
+        log.error(f"Unexpected error verifying Cashfree payment for user {user_id}: {error_message}", exc_info=True)
+        cart_service.update_direct_order_error(
+            gateway_order_id=order_id,
+            error_message=error_message
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to verify Cashfree payment"
@@ -234,7 +319,8 @@ async def verify_cashfree_payment(
 async def get_cashfree_order_status(
     order_id: str,
     user: dict = Depends(current_user),
-    cashfree_service: CashfreeService = Depends(get_cashfree_service)
+    cashfree_service: CashfreeService = Depends(get_cashfree_service),
+    cart_service: CartService = Depends(get_cart_service)
 ):
     """
     Get the current status of a Cashfree order.
@@ -243,7 +329,16 @@ async def get_cashfree_order_status(
     log.info(f"User {user_id} checking status for Cashfree order {order_id}")
     
     try:
-        order_data = await cashfree_service.verify_order(order_id)
+        try:
+            order_data = await cashfree_service.verify_order(order_id)
+        except Exception as verify_error:
+            error_message = f"Failed to check Cashfree order status: {str(verify_error)}"
+            log.error(f"Error checking Cashfree order status for user {user_id}: {error_message}", exc_info=True)
+            cart_service.update_direct_order_error(
+                gateway_order_id=order_id,
+                error_message=error_message
+            )
+            raise HTTPException(status_code=500, detail="Failed to check order status")
         
         return {
             "order_id": order_id,
@@ -255,6 +350,14 @@ async def get_cashfree_order_status(
             "order_expiry_time": order_data.get("order_expiry_time")
         }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        log.error(f"Error checking Cashfree order status for user {user_id}: {e}", exc_info=True)
+        error_message = f"Unexpected error checking Cashfree order status: {str(e)}"
+        log.error(f"Unexpected error checking Cashfree order status for user {user_id}: {error_message}", exc_info=True)
+        cart_service.update_direct_order_error(
+            gateway_order_id=order_id,
+            error_message=error_message
+        )
         raise HTTPException(status_code=500, detail="Failed to check order status")

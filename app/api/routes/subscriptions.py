@@ -48,7 +48,7 @@ def get_user_subscriptions_and_orders(
                 unit_price,
                 book:books(generated_title)
             )
-        """).eq("user_id", user_id).eq("status", "completed").execute()
+        """).eq("user_id", user_id).in_("status", ["completed", "generating"]).execute()
         
         log.info(f"Successfully fetched {len(subscriptions_res.data)} subscriptions and {len(history_res.data)} order history items for user_id: {user_id}")
         

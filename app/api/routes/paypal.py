@@ -58,13 +58,15 @@ async def create_payment_session(
     """
     user_id = user.get("id")
     log.info(f"User {user_id} creating PayPal payment session")
+    order = None
     try:
         cart = cart_service.get_cart(user_id=user_id)
         if not cart or not cart.get("items"):
             raise HTTPException(status_code=400, detail="Cart is empty")
-        # cart_service.sb.table("direct_orders").insert({
-        #     "order_id": cart["id"]
-        # }).execute()
+
+        # Get the draft order for error recording
+        order = cart_service._get_or_create_draft_order(user_id)
+        order_id_for_error = order["id"]
 
         subscription_total, one_time_total = paypal_service.calculate_cart_totals(cart["items"])
         has_subscriptions = subscription_total > 0
@@ -83,36 +85,94 @@ async def create_payment_session(
         if has_subscriptions:
             # --- SUBSCRIPTION FLOW ---
             log.info(f"Initiating SUBSCRIPTION flow. Sub Total: ${subscription_total}, Setup Fee: ${one_time_total}")
-            plan_id = await paypal_service.create_billing_plan(
-                subscription_price=subscription_total,
-                setup_fee=one_time_total
-            )
-            subscription_id, approval_url = await paypal_service.create_subscription(
-                plan_id=plan_id,
-                subscriber_name=user_name,
-                subscriber_email=user_email,
-                return_url=return_url,
-                cancel_url=cancel_url
-            )
-            cart_service.store_paypal_subscription_info(
-                user_id=user_id,
-                subscription_id=subscription_id,
-                plan_id=plan_id
-            )
+            try:
+                plan_id = await paypal_service.create_billing_plan(
+                    subscription_price=subscription_total,
+                    setup_fee=one_time_total
+                )
+                subscription_id, approval_url = await paypal_service.create_subscription(
+                    plan_id=plan_id,
+                    subscriber_name=user_name,
+                    subscriber_email=user_email,
+                    return_url=return_url,
+                    cancel_url=cancel_url
+                )
+            except Exception as subscription_error:
+                error_message = f"PayPal subscription creation failed: {str(subscription_error)}"
+                log.error(f"PayPal subscription creation error for user {user_id}: {error_message}", exc_info=True)
+                cart_service.create_direct_order_with_error(
+                    order_id=order_id_for_error,
+                    payment_method="paypal",
+                    error_message=error_message
+                )
+                raise HTTPException(status_code=500, detail="Failed to create PayPal payment session")
+            
+            try:
+                cart_service.store_paypal_subscription_info(
+                    user_id=user_id,
+                    subscription_id=subscription_id,
+                    plan_id=plan_id
+                )
+            except Exception as store_error:
+                error_message = f"Failed to store PayPal subscription info: {str(store_error)}"
+                log.error(f"Error storing PayPal subscription info for user {user_id}: {error_message}", exc_info=True)
+                cart_service.create_direct_order_with_error(
+                    order_id=order_id_for_error,
+                    payment_method="paypal",
+                    error_message=error_message,
+                    gateway_order_id=subscription_id
+                )
+                raise HTTPException(status_code=500, detail="Failed to create PayPal payment session")
+            
             return {"payment_type": "subscription", "subscription_id": subscription_id, "approval_url": approval_url}
         else:
             # --- ONE-TIME ORDER FLOW ---
             log.info(f"Initiating ONE-TIME ORDER flow. Total: ${one_time_total}")
-            order_id, approval_url = await paypal_service.create_order(
-                total_amount=one_time_total,
-                return_url=return_url,
-                cancel_url=cancel_url
-            )
+            try:
+                order_id, approval_url = await paypal_service.create_order(
+                    total_amount=one_time_total,
+                    return_url=return_url,
+                    cancel_url=cancel_url
+                )
+            except Exception as order_error:
+                error_message = f"PayPal order creation failed: {str(order_error)}"
+                log.error(f"PayPal order creation error for user {user_id}: {error_message}", exc_info=True)
+                cart_service.create_direct_order_with_error(
+                    order_id=order_id_for_error,
+                    payment_method="paypal",
+                    error_message=error_message
+                )
+                raise HTTPException(status_code=500, detail="Failed to create PayPal payment session")
             
-            cart_service.store_paypal_order_info(user_id=user_id, order_id=order_id)
+            try:
+                cart_service.store_paypal_order_info(user_id=user_id, order_id=order_id)
+            except Exception as store_error:
+                error_message = f"Failed to store PayPal order info: {str(store_error)}"
+                log.error(f"Error storing PayPal order info for user {user_id}: {error_message}", exc_info=True)
+                cart_service.create_direct_order_with_error(
+                    order_id=order_id_for_error,
+                    payment_method="paypal",
+                    error_message=error_message,
+                    gateway_order_id=order_id
+                )
+                raise HTTPException(status_code=500, detail="Failed to create PayPal payment session")
+            
             return {"payment_type": "order", "order_id": order_id, "approval_url": approval_url}
+    except HTTPException:
+        # Re-raise HTTP exceptions as they are already handled
+        raise
     except Exception as e:
-        log.error(f"Error during payment session creation for user {user_id}: {e}", exc_info=True)
+        error_message = f"Unexpected error during PayPal payment session creation: {str(e)}"
+        log.error(f"Error during payment session creation for user {user_id}: {error_message}", exc_info=True)
+        
+        # Record error if we have an order
+        if order:
+            cart_service.create_direct_order_with_error(
+                order_id=order["id"],
+                payment_method="paypal",
+                error_message=error_message
+            )
+        
         raise HTTPException(status_code=500, detail="Failed to create PayPal payment session")
 
 @router.get("/verify-subscription/{subscription_id}", summary="Verify PayPal subscription status")
@@ -147,60 +207,108 @@ async def verify_paypal_subscription(
     
     try:
         # Verify subscription with PayPal
-        subscription_data = await paypal_service.verify_subscription(subscription_id)
-        subscription_status = subscription_data.get("status")
+        try:
+            subscription_data = await paypal_service.verify_subscription(subscription_id)
+            subscription_status = subscription_data.get("status")
+        except Exception as verify_error:
+            error_message = f"PayPal subscription verification failed: {str(verify_error)}"
+            log.error(f"PayPal subscription verification error for {subscription_id}: {error_message}", exc_info=True)
+            cart_service.update_direct_order_error(
+                gateway_order_id=subscription_id,
+                error_message=error_message
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to verify PayPal subscription"
+            )
         
         if subscription_status == "ACTIVE":
             # Subscription is active, update order status and PayPal subscription status
             log.info(f"PayPal subscription {subscription_id} is active, updating order status")
             
-            # Update PayPal subscription status in database
-            cart_service.update_paypal_subscription_status(
-                user_id=user_id,
-                subscription_id=subscription_id,
-                status="active"
-            )
-            
-            # Get the order by PayPal subscription ID
-            order = cart_service.get_order_by_paypal_subscription_id(subscription_id)
-            if not order:
-                log.error(f"No order found for PayPal subscription {subscription_id}")
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Order not found for this subscription"
+            try:
+                # Update PayPal subscription status in database
+                cart_service.update_paypal_subscription_status(
+                    user_id=user_id,
+                    subscription_id=subscription_id,
+                    status="active"
                 )
-            
-            order_id = order["id"]
-            log.info(f"Updating order {order_id} status to 'pending' for content generation")
-            
-            # Update order status to 'pending' for content generation
-            cart_service.sb.table("orders").update({
-                "status": "pending",
-                "time_to_send": "07:00"
-            }).eq("id", order_id).execute()
-            
-            # Get the updated order with items
-            updated_order = cart_service.sb.table("orders").select("*, order_items(*)").eq("id", order_id).single().execute()
-            
-            log.info(f"Successfully updated order {order_id} to 'pending' status")
-            
-            # Trigger background task for content generation
-            background_tasks.add_task(
-                trigger_chapter_generation_sync,
-                order=updated_order.data,
-                chapter_service=chapter_service,
-                supabase=supabase
+                
+                # Get the order by PayPal subscription ID
+                order = cart_service.get_order_by_paypal_subscription_id(subscription_id)
+                if not order:
+                    error_message = f"No order found for PayPal subscription {subscription_id}"
+                    log.error(error_message)
+                    cart_service.update_direct_order_error(
+                        gateway_order_id=subscription_id,
+                        error_message=error_message
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Order not found for this subscription"
+                    )
+                
+                order_id = order["id"]
+                log.info(f"Updating order {order_id} status to 'pending' for content generation")
+                
+                # Update order status to 'pending' for content generation
+                cart_service.sb.table("orders").update({
+                    "status": "pending",
+                    "time_to_send": "07:00"
+                }).eq("id", order_id).execute()
+                
+                # Get the updated order with items
+                updated_order = cart_service.sb.table("orders").select("*, order_items(*)").eq("id", order_id).single().execute()
+                
+                log.info(f"Successfully updated order {order_id} to 'pending' status")
+                
+                # Trigger background task for content generation
+                background_tasks.add_task(
+                    trigger_chapter_generation_sync,
+                    order=updated_order.data,
+                    chapter_service=chapter_service,
+                    supabase=supabase
+                )
+                
+                log.info(f"Enqueued chapter generation task for order_id: {order_id}")
+                
+                return {
+                    "status": "success",
+                    "message": "Subscription activated and order processed successfully. Content generation has started.",
+                    "order": updated_order.data,
+                    "subscription": subscription_data
+                }
+                
+            except HTTPException:
+                # Re-raise HTTP exceptions
+                raise
+            except Exception as processing_error:
+                error_message = f"Error processing active PayPal subscription: {str(processing_error)}"
+                log.error(f"Error processing PayPal subscription {subscription_id}: {error_message}", exc_info=True)
+                cart_service.update_direct_order_error(
+                    gateway_order_id=subscription_id,
+                    error_message=error_message
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Subscription was activated but order processing failed"
+                )
+        elif subscription_status in ["CANCELLED", "SUSPENDED", "EXPIRED"]:
+            # Subscription failed, update error status
+            error_message = f"PayPal subscription {subscription_status.lower()}: {subscription_data.get('status_change_note', 'No additional details')}"
+            log.warning(f"PayPal subscription {subscription_id} failed with status {subscription_status}")
+            cart_service.update_direct_order_error(
+                gateway_order_id=subscription_id,
+                error_message=error_message
             )
-            
-            log.info(f"Enqueued chapter generation task for order_id: {order_id}")
             
             return {
-                "status": "success",
-                "message": "Subscription activated and order processed successfully. Content generation has started.",
-                "order": updated_order.data,
+                "status": "failed",
+                "message": f"Subscription {subscription_status.lower()}",
                 "subscription": subscription_data
             }
         else:
+            # Subscription still in progress
             log.warning(f"PayPal subscription {subscription_id} status is {subscription_status}")
             
             # Update PayPal subscription status even if not active yet
@@ -220,7 +328,12 @@ async def verify_paypal_subscription(
         log.error(f"HTTP error verifying PayPal subscription for user {user_id}: {e.detail}")
         raise e
     except Exception as e:
-        log.error(f"Unexpected error verifying PayPal subscription for user {user_id}: {e}", exc_info=True)
+        error_message = f"Unexpected error verifying PayPal subscription: {str(e)}"
+        log.error(f"Unexpected error verifying PayPal subscription for user {user_id}: {error_message}", exc_info=True)
+        cart_service.update_direct_order_error(
+            gateway_order_id=subscription_id,
+            error_message=error_message
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to verify PayPal subscription"
@@ -242,10 +355,25 @@ async def capture_paypal_order(
         order_from_db = cart_service.get_order_by_paypal_order_id(order_id)
         log.debug(f"Fetched order from DB for PayPal order {order_id}: {order_from_db}")
         if not order_from_db or order_from_db["user_id"] != user_id:
+            error_message = f"Order not found or access denied for PayPal order {order_id}"
+            cart_service.update_direct_order_error(
+                gateway_order_id=order_id,
+                error_message=error_message
+            )
             raise HTTPException(status_code=404, detail="Order not found or access denied.")
 
-        capture_data = await paypal_service.capture_order(order_id)
-        log.info(f"PayPal order {order_id} capture response: {capture_data}")
+        try:
+            capture_data = await paypal_service.capture_order(order_id)
+            log.info(f"PayPal order {order_id} capture response: {capture_data}")
+        except Exception as capture_error:
+            error_message = f"PayPal order capture failed: {str(capture_error)}"
+            log.error(f"PayPal capture error for order {order_id}: {error_message}", exc_info=True)
+            cart_service.update_direct_order_error(
+                gateway_order_id=order_id,
+                error_message=error_message
+            )
+            raise HTTPException(status_code=500, detail="Failed to capture PayPal payment")
+            
         if capture_data.get("status") == "COMPLETED":
             log.info(f"PayPal order {order_id} captured successfully, updating local order status")
             try:
@@ -258,33 +386,79 @@ async def capture_paypal_order(
                 updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
                 background_tasks.add_task(trigger_chapter_generation_sync, order=updated_order.data, chapter_service=chapter_service, supabase=supabase)
                 return {"status": "success", "message": "Payment captured.", "order": updated_order.data}
-            except Exception as e:
-                log.error(f"Error updating order {db_order_id} after successful PayPal capture: {e}", exc_info=True)
+            except Exception as processing_error:
+                error_message = f"Error updating order after successful PayPal capture: {str(processing_error)}"
+                log.error(f"Error updating order {db_order_id} after successful PayPal capture: {error_message}", exc_info=True)
+                cart_service.update_direct_order_error(
+                    gateway_order_id=order_id,
+                    error_message=error_message
+                )
+                raise HTTPException(status_code=500, detail="Payment was captured but order processing failed")
         else:
+            # Payment capture failed
             status = capture_data.get("status", "unknown")
+            error_message = f"PayPal payment capture failed with status: {status}"
+            log.error(f"PayPal capture failed for order {order_id}: {error_message}")
+            cart_service.update_direct_order_error(
+                gateway_order_id=order_id,
+                error_message=error_message
+            )
             raise HTTPException(status_code=400, detail=f"Payment capture failed with status: {status}")
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        log.error(f"Unexpected error capturing order {order_id}: {e}", exc_info=True)
+        error_message = f"Unexpected error capturing PayPal order: {str(e)}"
+        log.error(f"Unexpected error capturing order {order_id}: {error_message}", exc_info=True)
+        cart_service.update_direct_order_error(
+            gateway_order_id=order_id,
+            error_message=error_message
+        )
         raise HTTPException(status_code=500, detail="Failed to capture PayPal payment")
 
 @router.post("/cancel-subscription/{subscription_id}", summary="Cancel a PayPal subscription")
 async def cancel_paypal_subscription(
     subscription_id: str,
     user: dict = Depends(current_user),
-    paypal_service: PayPalService = Depends(get_paypal_service)
+    paypal_service: PayPalService = Depends(get_paypal_service),
+    cart_service: CartService = Depends(get_cart_service)
 ):
     """Cancels an active PayPal subscription via the API."""
     user_id = user.get("id")
     log.info(f"User {user_id} attempting to cancel PayPal subscription {subscription_id}")
     try:
         # NOTE: You should add logic here to verify from your DB that this subscription belongs to this user.
-        success = await paypal_service.cancel_subscription(subscription_id)
+        try:
+            success = await paypal_service.cancel_subscription(subscription_id)
+        except Exception as cancel_error:
+            error_message = f"PayPal subscription cancellation failed: {str(cancel_error)}"
+            log.error(f"PayPal cancellation error for subscription {subscription_id}: {error_message}", exc_info=True)
+            cart_service.update_direct_order_error(
+                gateway_order_id=subscription_id,
+                error_message=error_message
+            )
+            raise HTTPException(status_code=500, detail=f"Failed to cancel subscription: {str(cancel_error)}")
+            
         if success:
             log.info(f"Successfully cancelled subscription {subscription_id}")
             # NOTE: You should also update the subscription status in your own database here.
             return {"status": "success", "message": "Subscription has been cancelled."}
         else:
+            error_message = f"PayPal subscription cancellation request failed for subscription {subscription_id}"
+            log.error(error_message)
+            cart_service.update_direct_order_error(
+                gateway_order_id=subscription_id,
+                error_message=error_message
+            )
             raise HTTPException(status_code=400, detail="Cancellation request failed.")
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        log.error(f"Error cancelling subscription {subscription_id}: {e}", exc_info=True)
+        error_message = f"Unexpected error cancelling PayPal subscription: {str(e)}"
+        log.error(f"Error cancelling subscription {subscription_id}: {error_message}", exc_info=True)
+        cart_service.update_direct_order_error(
+            gateway_order_id=subscription_id,
+            error_message=error_message
+        )
         raise HTTPException(status_code=500, detail=f"Failed to cancel subscription: {str(e)}")
