@@ -7,6 +7,7 @@ from app.services.cart_service import CartService
 from app.services.cashfree_service import CashfreeService
 from app.services.user_service import UserService
 from app.services.chapter_service import ChapterService
+from app.services.email_service import EmailService
 from app.api.deps import current_user
 from app.core.logging import get_logger
 from app.core.config import settings
@@ -40,6 +41,10 @@ def get_chapter_service(
     if openai_client is None:
         openai_client = OpenAI()
     return ChapterService(supabase=supabase, openai_client=openai_client)
+
+def get_email_service() -> EmailService:
+    """Dependency to provide an EmailService instance."""
+    return EmailService()
 
 # --- Cashfree Payment Endpoints ---
 
@@ -160,6 +165,7 @@ async def verify_cashfree_payment(
     cart_service: CartService = Depends(get_cart_service),
     user_service: UserService = Depends(get_user_service),
     chapter_service: ChapterService = Depends(get_chapter_service),
+    email_service: EmailService = Depends(get_email_service),
     supabase: Client = Depends(get_supabase)
 ):
     """
@@ -237,6 +243,14 @@ async def verify_cashfree_payment(
                 updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
                 
                 log.info(f"Successfully updated order {db_order_id} to 'pending' status")
+                
+                # Send confirmation email
+                try:
+                    email_service.send_confirmation_email(db_order_id)
+                    log.info(f"Confirmation email sent successfully for order {db_order_id}")
+                except Exception as email_error:
+                    log.error(f"Failed to send confirmation email for order {db_order_id}: {email_error}")
+                    # Don't fail the whole process if email fails
                 
                 # Trigger background task for content generation
                 background_tasks.add_task(

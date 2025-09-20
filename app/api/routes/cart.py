@@ -6,8 +6,9 @@ from openai import OpenAI
 from app.db.supabase import get_supabase
 from app.services.cart_service import CartService
 from app.services.chapter_service import ChapterService
-from app.services.pdf_service import PDFService
 from app.services.email_service import EmailService
+from app.services.user_service import UserService
+from app.services.pdf_service import PDFService
 from app.domain.models import CartItemAdd, CartItemUpdate, CheckoutRequest, CartResponse
 from app.api.deps import current_user
 from app.core.logging import get_logger
@@ -32,6 +33,14 @@ def get_chapter_service(
 ) -> ChapterService:
     """Dependency to provide a ChapterService instance."""
     return ChapterService(supabase=supabase, openai_client=openai_client)
+
+def get_email_service() -> EmailService:
+    """Dependency to provide an EmailService instance."""
+    return EmailService()
+
+def get_user_service(supabase: Client = Depends(get_supabase)) -> UserService:
+    """Dependency to provide a UserService instance."""
+    return UserService(supabase=supabase)
 
 # --- Helper Functions ---
 
@@ -380,6 +389,7 @@ def checkout_with_credits(
     user: dict = Depends(current_user),
     cart_service: CartService = Depends(get_cart_service),
     chapter_service: ChapterService = Depends(get_chapter_service),
+    email_service: EmailService = Depends(get_email_service),
     supabase: Client = Depends(get_supabase)
 ):
     """
@@ -393,6 +403,14 @@ def checkout_with_credits(
         final_order = cart_service.checkout_with_credits(user_id=user_id, time_to_send=body.time_to_send)
         order_id = final_order.get('id')
         log.info(f"[API_CREDIT_CHECKOUT] User {user_id} successfully checked out with credits, order_id: {order_id}")
+
+        # Send confirmation email
+        try:
+            email_service.send_confirmation_email(order_id)
+            log.info(f"[API_CREDIT_CHECKOUT] Confirmation email sent successfully for order {order_id}")
+        except Exception as email_error:
+            log.error(f"[API_CREDIT_CHECKOUT] Failed to send confirmation email for order {order_id}: {email_error}")
+            # Don't fail the whole process if email fails
 
         # Add the long-running job to the background
         log.debug(f"[API_CREDIT_CHECKOUT] Enqueuing chapter generation task for order_id: {order_id}")

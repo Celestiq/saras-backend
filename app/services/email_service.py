@@ -309,6 +309,158 @@ class EmailService:
                 detail=f"Unexpected error while sending email: {str(e)}"
             )
 
+    def send_confirmation_email(self, order_id: str) -> Dict[str, Any]:
+        """
+        Sends a confirmation email after successful payment using the confirmation.html template.
+        Fetches all required data from the database using the order_id.
+        
+        Args:
+            order_id: The order ID to send confirmation email for
+            
+        Returns:
+            Dict containing the response from Zoho API
+        """
+        log.info(f"Preparing to send confirmation email for order {order_id}")
+        
+        try:
+            # Import here to avoid circular imports
+            from app.db.supabase import get_supabase
+            from datetime import datetime
+            
+            supabase = get_supabase()
+            
+            # Fetch order details with order items, books, and user profile
+            order_query = supabase.table("orders").select("""
+                *,
+                order_items (
+                    *,
+                    books (
+                        id,
+                        generated_title
+                    )
+                ),
+                profiles!orders_user_id_fkey (
+                    user_id,
+                    full_name,
+                    email
+                )
+            """).eq("id", order_id).single().execute()
+            
+            if not order_query.data:
+                log.error(f"Order not found: {order_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Order not found"
+                )
+            
+            order_data = order_query.data
+            user_profile = order_data.get("profiles")
+            order_items = order_data.get("order_items", [])
+            
+            if not user_profile:
+                log.error(f"User profile not found for order: {order_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User profile not found"
+                )
+            
+            if not user_profile.get("email"):
+                log.error(f"User email not found for order: {order_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="User email not found"
+                )
+            
+            # Extract data
+            user_email = user_profile.get("email")
+            user_name = user_profile.get("full_name", "User")
+            total_amount = order_data.get("total", 0.0)
+            order_date = datetime.fromisoformat(order_data.get("created_at").replace('Z', '+00:00')).strftime("%B %d, %Y")
+            
+            # Fetch the confirmation.html template from Supabase storage
+            try:
+                template_data = supabase.storage.from_("html").download("utility/confirmation.html")
+                html_template = template_data.decode('utf-8')
+                log.info("Successfully fetched confirmation email template from Supabase storage")
+            except Exception as template_error:
+                log.error(f"Failed to fetch email template from Supabase storage: {template_error}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to fetch email template from storage"
+                )
+            
+            # Replace basic placeholders
+            html_content = html_template.replace("[User's Name]", user_name)
+            html_content = html_content.replace("[Order ID]", f"#{order_id}")
+            html_content = html_content.replace("[Date]", order_date)
+            html_content = html_content.replace("$[Total Amount]", f"${total_amount:.2f}")
+            
+            # Handle order items - build the items section
+            if order_items:
+                items_html = ""
+                for item in order_items:
+                    book_title = "Your Book"
+                    if item.get("books"):
+                        book_title = item["books"].get("generated_title", "Your Book")
+                    
+                    order_type = "Newsletter Subscription" if item.get("subscription", True) else "eBook"
+                    item_price = item.get("unit_price", 0.0)
+                    quantity = item.get("quantity", 1)
+                    
+                    # Add each item
+                    item_html = f"""
+                                                    <tr>
+                                                        <td style="padding-top: 15px;">
+                                                            <p style="font-family: 'Merriweather', serif; font-size: 16px; color: #3a3a3a; margin: 0 0 5px 0;">
+                                                                <strong>{book_title}</strong>
+                                                            </p>
+                                                            <p style="font-family: 'Merriweather', serif; font-size: 14px; color: #6a6a6a; margin: 0;">
+                                                                <em>{order_type}</em> • Qty: {quantity} • ${item_price:.2f}
+                                                            </p>
+                                                        </td>
+                                                    </tr>"""
+                    items_html += item_html
+                
+                # Replace the single item placeholder with multiple items
+                single_item_pattern = '''                                            <tr>
+                                                <td style="padding-top: 15px;">
+                                                    <p style="font-family: 'Merriweather', serif; font-size: 16px; color: #3a3a3a; margin: 0 0 5px 0;">
+                                                        <strong>[Book Title]</strong>
+                                                    </p>
+                                                    <p style="font-family: 'Merriweather', serif; font-size: 14px; color: #6a6a6a; margin: 0;">
+                                                        <em>[Newsletter Subscription / Full eBook]</em>
+                                                    </p>
+                                                </td>
+                                            </tr>'''
+                
+                html_content = html_content.replace(single_item_pattern, items_html)
+            else:
+                # Fallback for no items
+                html_content = html_content.replace("[Book Title]", "Your Book")
+                html_content = html_content.replace("[Newsletter Subscription / Full eBook]", "Full eBook")
+            
+            # Set manage orders URL
+            manage_orders_url = f"{settings.FRONTEND_URL}/manage-orders" if hasattr(settings, 'FRONTEND_URL') else "#"
+            html_content = html_content.replace("[Link to Manage Orders Page]", manage_orders_url)
+            
+            subject = f"Your Saras Order #{order_id} is Confirmed!"
+            
+            # Send the email using the simple email method
+            return self.send_simple_email(
+                recipient_email=user_email,
+                subject=subject,
+                html_content=html_content
+            )
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.error(f"Error sending confirmation email for order {order_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to send confirmation email: {str(e)}"
+            )
+
 if __name__ == "__main__":
     # Simple test to send an email (replace with actual values)
     email_service = EmailService()
