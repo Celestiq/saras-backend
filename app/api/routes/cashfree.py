@@ -239,6 +239,9 @@ async def verify_cashfree_payment(
                     "time_to_send": "07:00"
                 }).eq("id", db_order_id).execute()
                 
+                # Update subscription status for subscription items
+                cart_service.update_subscription_status_for_order(db_order_id)
+                
                 # Get the updated order with items
                 updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
                 

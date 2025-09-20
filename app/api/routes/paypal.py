@@ -263,6 +263,9 @@ async def verify_paypal_subscription(
                     "time_to_send": "07:00"
                 }).eq("id", order_id).execute()
                 
+                # Update subscription status for subscription items
+                cart_service.update_subscription_status_for_order(order_id)
+                
                 # Get the updated order with items
                 updated_order = cart_service.sb.table("orders").select("*, order_items(*)").eq("id", order_id).single().execute()
                 
@@ -398,6 +401,9 @@ async def capture_paypal_order(
                 cart_service.sb.table("direct_orders").update({
                     "gateway_order_status": "completed"
                 }).eq("order_id", db_order_id).execute() 
+                # Update subscription status for subscription items
+                cart_service.update_subscription_status_for_order(db_order_id)
+                
                 updated_order = cart_service.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", db_order_id).single().execute()
 
                 # Send confirmation email

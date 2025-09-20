@@ -25,8 +25,8 @@ class Settings(BaseSettings):
 
     PLANNING_MODEL: str = "gpt-5-nano"
     CONTENT_MODEL: str = "gpt-5-nano"
-    WEB_SEARCH: bool = False
-    CONTENT_EFFORT: str = "minimal"     # options: low, medium, high
+    WEB_SEARCH: bool = True
+    CONTENT_EFFORT: str = "medium"     # options: minimal, low, medium, high
 
     JOB_RUNNER_SECRET: str
 

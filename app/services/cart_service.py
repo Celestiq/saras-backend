@@ -207,6 +207,9 @@ class CartService:
                     log.error(f"Failed to update book status for book_id: {book_id}. Error: {e}", exc_info=True)
                     # Continue with checkout even if book status update fails
 
+        # Update subscription status for subscription items before returning
+        self.update_subscription_status_for_order(order_id)
+        
         updated_order_response = self.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", final_order_state["id"]).single().execute()
 
         log.info(f"Order {order_id} status successfully updated to 'pending' for user_id: {user_id}")
@@ -407,6 +410,9 @@ class CartService:
                     log.error(f"[CREDIT_CHECKOUT] Failed to update book status for book_id: {book_id}. Error: {e}", exc_info=True)
                     # Continue with checkout even if book status update fails
 
+        # Update subscription status for subscription items before returning
+        self.update_subscription_status_for_order(order_id)
+        
         updated_order_response = self.sb.table("orders").select("*, order_items(*), direct_orders(*)").eq("id", final_order_state["id"]).single().execute()
         log.debug(f"[CREDIT_CHECKOUT] Final order response for order_id {order_id}: {updated_order_response}")
         
@@ -508,3 +514,28 @@ class CartService:
             
         except Exception as e:
             log.error(f"Failed to create direct_orders record with error status: {e}", exc_info=True)
+
+    def update_subscription_status_for_order(self, order_id: str) -> None:
+        """
+        Updates subscription_status to 'active' and idx_sent to 0 for all order items 
+        where subscription = TRUE for the given order_id.
+        This is called after successful checkout and just before chapter generation.
+        """
+        log.info(f"Updating subscription status for order_id: {order_id}")
+        
+        try:
+            # Update subscription status for subscription items in this order
+            update_response = self.sb.table("order_items").update({
+                "subscription_status": "active",
+                "idx_sent": 0
+            }).eq("order_id", order_id).eq("subscription", True).execute()
+            
+            updated_count = len(update_response.data) if update_response.data else 0
+            log.info(f"Successfully updated {updated_count} subscription items to active status for order_id: {order_id}")
+            
+            if updated_count == 0:
+                log.info(f"No subscription items found to update for order_id: {order_id}")
+                
+        except Exception as e:
+            log.error(f"Failed to update subscription status for order_id {order_id}: {e}", exc_info=True)
+            # Don't raise exception as this shouldn't fail the checkout process

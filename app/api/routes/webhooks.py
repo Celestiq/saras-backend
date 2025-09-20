@@ -191,6 +191,24 @@ async def handle_cashfree_webhook(
                         .eq("gateway_order_id", gateway_order_id) \
                         .execute()
                 
+                # If payment was successful, update subscription status for subscription items
+                if new_status == "completed":
+                    try:
+                        # Get the order_id from the direct_orders table
+                        direct_order = cart_order_response.data[0]
+                        order_id = direct_order.get("order_id")
+                        
+                        if order_id:
+                            # Update subscription status for subscription items
+                            from app.services.cart_service import CartService
+                            cart_service = CartService(supabase)
+                            cart_service.update_subscription_status_for_order(order_id)
+                            log.info(f"Updated subscription status for order_id: {order_id} via webhook")
+                        else:
+                            log.warning(f"No order_id found in direct_order for gateway_order_id: {gateway_order_id}")
+                    except Exception as sub_update_error:
+                        log.error(f"Failed to update subscription status via webhook: {sub_update_error}", exc_info=True)
+                
                 log.info(f"Successfully updated cart order status via webhook", extra={
                     "gateway_order_id": gateway_order_id,
                     "event_type": event_type,
