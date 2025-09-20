@@ -66,6 +66,7 @@ Output format must be strict JSON with this structure:
     ...
   ]
 }
+Only put the module and title names in the output without any additional numbering.
 Do not include explanations, only return the JSON.
 '''
 
