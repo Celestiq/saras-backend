@@ -1,8 +1,8 @@
 # app/services/cashfree_service.py
-import os
 import requests
 from typing import Dict, List, Optional, Tuple
 from app.core.logging import get_logger
+from app.core.config import settings
 
 log = get_logger(__name__)
 
@@ -12,9 +12,9 @@ class CashfreeService:
     def __init__(self):
         log.info("CashfreeService: Initializing Cashfree service")
         
-        self.client_id = os.getenv("CASHFREE_CLIENT_ID")
-        self.client_secret = os.getenv("CASHFREE_CLIENT_SECRET")
-        self.base_url = os.getenv("CASHFREE_BASE_URL", "https://sandbox.cashfree.com")
+        self.client_id = settings.CASHFREE_CLIENT_ID
+        self.client_secret = settings.CASHFREE_CLIENT_SECRET
+        self.base_url = settings.CASHFREE_BASE_URL
         self.api_version = "2025-01-01"
         
         log.info(f"CashfreeService: Configuration loaded - Base URL: {self.base_url}")

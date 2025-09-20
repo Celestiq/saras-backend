@@ -5,7 +5,12 @@ from supabase import Client
 from app.core.logging import get_logger
 from app.db.supabase import get_supabase
 from app.services.credit_service import CreditService
+from app.core.config import settings
 import json
+import base64
+import hashlib
+import hmac
+import requests
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
@@ -13,6 +18,74 @@ router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 def get_credit_service(supabase: Client = Depends(get_supabase)) -> CreditService:
     """Dependency to provide a CreditService instance."""
     return CreditService(supabase=supabase)
+
+# -------------------- Cashfree Webhook --------------------
+def verify_cashfree_signature(request: Request, raw_body: bytes) -> bool:
+    """
+    Verify the Cashfree webhook signature according to their documentation.
+    
+    Args:
+        request: FastAPI Request object containing headers
+        raw_body: Raw request body as bytes
+        
+    Returns:
+        bool: True if signature is valid, False otherwise
+        
+    Raises:
+        HTTPException: If required headers are missing or signature verification fails
+    """
+    try:
+        # Extract required headers
+        timestamp = request.headers.get('x-webhook-timestamp')
+        signature = request.headers.get('x-webhook-signature')
+        
+        if not timestamp:
+            log.error("Missing x-webhook-timestamp header in Cashfree webhook")
+            raise HTTPException(status_code=400, detail="Missing x-webhook-timestamp header")
+            
+        if not signature:
+            log.error("Missing x-webhook-signature header in Cashfree webhook")
+            raise HTTPException(status_code=400, detail="Missing x-webhook-signature header")
+        
+        # Get the secret key from settings
+        secret_key = settings.CASHFREE_CLIENT_SECRET
+        if not secret_key:
+            log.error("Cashfree client secret not configured")
+            raise HTTPException(status_code=500, detail="Webhook verification not configured")
+        
+        # Convert raw body to string for signature verification
+        raw_body_str = raw_body.decode('utf-8')
+        
+        # Create the signed payload: timestamp + raw_body
+        signed_payload = timestamp + raw_body_str
+        
+        # Generate expected signature
+        message = bytes(signed_payload, 'utf-8')
+        secret_key_bytes = bytes(secret_key, 'utf-8')
+        
+        generated_signature = base64.b64encode(
+            hmac.new(secret_key_bytes, message, digestmod=hashlib.sha256).digest()
+        )
+        computed_signature = generated_signature.decode('utf-8')
+        
+        # Compare signatures
+        if computed_signature == signature:
+            log.info("Cashfree webhook signature verification successful")
+            return True
+        else:
+            log.warning("Cashfree webhook signature verification failed", extra={
+                "expected": computed_signature,
+                "received": signature,
+                "timestamp": timestamp
+            })
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+            
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        log.error(f"Error during Cashfree signature verification: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Signature verification failed")
 
 @router.post("/cashfree", status_code=status.HTTP_200_OK)
 async def handle_cashfree_webhook(
@@ -31,11 +104,19 @@ async def handle_cashfree_webhook(
     log.debug(f"Webhook headers: {headers}")
 
     # --- CRITICAL SECURITY STEP ---
-    # TODO: Implement webhook signature verification here to ensure the request is from Cashfree.
+    # Read raw body for signature verification
+    try:
+        raw_body = await request.body()
+    except Exception as e:
+        log.error(f"Error reading webhook request body: {str(e)}")
+        raise HTTPException(status_code=400, detail="Error reading request body")
+    
+    # Verify webhook signature to ensure the request is from Cashfree
+    verify_cashfree_signature(request, raw_body)
     # --------------------------------
 
     try:
-        payload = await request.json()
+        payload = json.loads(raw_body.decode('utf-8'))
     except json.JSONDecodeError as e:
         log.error(f"Invalid JSON payload in Cashfree webhook: {str(e)}")
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
