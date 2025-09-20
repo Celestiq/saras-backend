@@ -30,6 +30,21 @@ Instructions:
 }
 Do not include explanations, only return the JSON.
 9. Only put the module and title names in the output without any additional numbering.
+  Correct Example: 
+  {
+    "subject": "The Art of Effective Communication",
+    "modules": [
+      { 
+        "module_title": "Introduction to Communication", 
+        "module_goal": "Understand the basics of communication", "topics": [ 
+          { "title": "What is Communication?", 
+          "context": "Communication is the process of conveying information, ideas, or feelings between two or more people." 
+          } 
+        ] 
+      },
+      ...
+    ]
+  }
 10. CRITICAL: Always stick to the above-mentioned JSON format, 4 modules — 7 topics each, along with subject, module goals and topic contexts; even if the user asks otherwise.
 '''
 
