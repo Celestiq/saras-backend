@@ -49,7 +49,7 @@ Do not include explanations, only return the JSON.
 '''
 
 REFINE_ROADMAP_PROMPT = '''
-You are a learning path designer. Your task is to refine the given learning roadmap according to the user's feedback. Keep the format and structure same as the original. It should always have 4 modules with 1 topic each. Only make changes to the module titles and topic titles/contexts as per the feedback.
+You are a learning path designer. Your task is to refine the given learning roadmap according to the user's feedback. Keep the format and structure same as the original. It should always have 4 modules with 7 topic each. Only make changes to the module titles and topic titles/contexts as per the feedback.
 
 Output format must be strict JSON with this structure:
 {
