@@ -17,6 +17,7 @@ from app.api.routes.email import router as email_router
 from app.api.routes.pdf import router as pdf_router
 from app.api.routes.subscriptions import router as subscriptions_router
 from app.api.routes.webhooks import router as webhooks_router
+from app.api.routes.tasks import router as tasks_router
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Saras Backend", version="0.1.0", redirect_slashes=False)
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(pdf_router)
     app.include_router(subscriptions_router)
     app.include_router(webhooks_router)
+    app.include_router(tasks_router)
     return app
 
 app = create_app()

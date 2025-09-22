@@ -1,5 +1,5 @@
 # app/api/routes/cashfree.py
-from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from typing import Dict, Any
 
 from app.db.supabase import get_supabase
@@ -8,12 +8,11 @@ from app.services.cashfree_service import CashfreeService
 from app.services.user_service import UserService
 from app.services.chapter_service import ChapterService
 from app.services.email_service import EmailService
+from app.services.cloud_tasks_service import CloudTasksService
 from app.api.deps import current_user
 from app.core.logging import get_logger
 from app.core.config import settings
 from supabase import Client
-
-from app.api.routes.cart import trigger_chapter_generation_sync
 
 log = get_logger(__name__)
 
@@ -45,6 +44,10 @@ def get_chapter_service(
 def get_email_service() -> EmailService:
     """Dependency to provide an EmailService instance."""
     return EmailService()
+
+def get_cloud_tasks_service() -> CloudTasksService:
+    """Dependency to provide a CloudTasksService instance."""
+    return CloudTasksService()
 
 # --- Cashfree Payment Endpoints ---
 
@@ -159,13 +162,12 @@ async def create_payment_session(
 @router.post("/verify-payment/{order_id}", summary="Verify Cashfree payment status")
 async def verify_cashfree_payment(
     order_id: str,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(current_user),
     cashfree_service: CashfreeService = Depends(get_cashfree_service),
     cart_service: CartService = Depends(get_cart_service),
     user_service: UserService = Depends(get_user_service),
-    chapter_service: ChapterService = Depends(get_chapter_service),
     email_service: EmailService = Depends(get_email_service),
+    cloud_tasks_service: CloudTasksService = Depends(get_cloud_tasks_service),
     supabase: Client = Depends(get_supabase)
 ):
     """
@@ -255,15 +257,13 @@ async def verify_cashfree_payment(
                     log.error(f"Failed to send confirmation email for order {db_order_id}: {email_error}")
                     # Don't fail the whole process if email fails
                 
-                # Trigger background task for content generation
-                background_tasks.add_task(
-                    trigger_chapter_generation_sync,
-                    order=updated_order.data,
-                    chapter_service=chapter_service,
-                    supabase=supabase
-                )
-                log.info("Went through background task addition")
-                log.info(f"Enqueued chapter generation task for order_id: {db_order_id}")
+                # Create Cloud Task for content generation
+                try:
+                    task_name = cloud_tasks_service.create_chapter_generation_task(order_id=db_order_id)
+                    log.info(f"Created Cloud Task for chapter generation: {task_name} for order_id: {db_order_id}")
+                except Exception as task_error:
+                    log.error(f"Failed to create Cloud Task for order_id: {db_order_id}. Error: {task_error}", exc_info=True)
+                    # Don't fail the whole process if task creation fails
                 
                 return {
                     "status": "success",

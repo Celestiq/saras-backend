@@ -10,3 +10,4 @@ python-jose[cryptography]
 xhtml2pdf
 markdown2
 pydantic[email]
+google-cloud-tasks

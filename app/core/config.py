@@ -37,4 +37,10 @@ class Settings(BaseSettings):
     CASHFREE_CLIENT_SECRET: str
     CASHFREE_BASE_URL: str = "https://sandbox.cashfree.com"
 
+    # Google Cloud Tasks Configuration
+    GCP_PROJECT_ID: str
+    GCP_LOCATION: str = "us-central1"
+    GCP_QUEUE_NAME: str = "chapter-generation-queue"
+    CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL: str | None = None
+
 settings = Settings()

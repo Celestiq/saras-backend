@@ -1,5 +1,5 @@
 # app/api/routes/paypal.py
-from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from typing import Dict, Any
 from urllib.parse import urlencode
 
@@ -9,13 +9,11 @@ from app.services.paypal_service import PayPalService
 from app.services.user_service import UserService
 from app.services.chapter_service import ChapterService
 from app.services.email_service import EmailService
+from app.services.cloud_tasks_service import CloudTasksService
 from app.api.deps import current_user
 from app.core.logging import get_logger
 from app.core.config import settings
 from supabase import Client
-
-# Import the background task function from cart.py
-from app.api.routes.cart import trigger_chapter_generation_sync
 
 log = get_logger(__name__)
 
@@ -47,6 +45,10 @@ def get_chapter_service(
 def get_email_service() -> EmailService:
     """Dependency to provide an EmailService instance."""
     return EmailService()
+
+def get_cloud_tasks_service() -> CloudTasksService:
+    """Dependency to provide a CloudTasksService instance."""
+    return CloudTasksService()
 
 # --- PayPal Subscription Endpoints ---
 
@@ -183,13 +185,12 @@ async def create_payment_session(
 @router.get("/verify-subscription/{subscription_id}", summary="Verify PayPal subscription status")
 async def verify_paypal_subscription(
     subscription_id: str,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(current_user),
     paypal_service: PayPalService = Depends(get_paypal_service),
     cart_service: CartService = Depends(get_cart_service),
     user_service: UserService = Depends(get_user_service),
-    chapter_service: ChapterService = Depends(get_chapter_service),
     email_service: EmailService = Depends(get_email_service),
+    cloud_tasks_service: CloudTasksService = Depends(get_cloud_tasks_service),
     supabase: Client = Depends(get_supabase)
 ):
     """
@@ -279,15 +280,13 @@ async def verify_paypal_subscription(
                     log.error(f"Failed to send confirmation email for order {order_id}: {email_error}")
                     # Don't fail the whole process if email fails
                 
-                # Trigger background task for content generation
-                background_tasks.add_task(
-                    trigger_chapter_generation_sync,
-                    order=updated_order.data,
-                    chapter_service=chapter_service,
-                    supabase=supabase
-                )
-                
-                log.info(f"Enqueued chapter generation task for order_id: {order_id}")
+                # Create Cloud Task for content generation
+                try:
+                    task_name = cloud_tasks_service.create_chapter_generation_task(order_id=order_id)
+                    log.info(f"Created Cloud Task for chapter generation: {task_name} for order_id: {order_id}")
+                except Exception as task_error:
+                    log.error(f"Failed to create Cloud Task for order_id: {order_id}. Error: {task_error}", exc_info=True)
+                    # Don't fail the whole process if task creation fails
                 
                 return {
                     "status": "success",
@@ -359,12 +358,11 @@ async def verify_paypal_subscription(
 @router.post("/capture-order/{order_id}", summary="Capture payment for a one-time order")
 async def capture_paypal_order(
     order_id: str,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(current_user),
     paypal_service: PayPalService = Depends(get_paypal_service),
     cart_service: CartService = Depends(get_cart_service),
-    chapter_service: ChapterService = Depends(get_chapter_service),
     email_service: EmailService = Depends(get_email_service),
+    cloud_tasks_service: CloudTasksService = Depends(get_cloud_tasks_service),
     supabase: Client = Depends(get_supabase)
 ):
     user_id = user.get("id")
@@ -414,9 +412,13 @@ async def capture_paypal_order(
                     log.error(f"Failed to send confirmation email for order {db_order_id}: {email_error}")
                     # Don't fail the whole process if email fails
 
-                background_tasks.add_task(
-                    trigger_chapter_generation_sync, order=updated_order.data, chapter_service=chapter_service, supabase=supabase
-                )
+                # Create Cloud Task for content generation
+                try:
+                    task_name = cloud_tasks_service.create_chapter_generation_task(order_id=db_order_id)
+                    log.info(f"Created Cloud Task for chapter generation: {task_name} for PayPal order {order_id}")
+                except Exception as task_error:
+                    log.error(f"Failed to create Cloud Task for PayPal order {order_id}. Error: {task_error}", exc_info=True)
+                    # Don't fail the whole process if task creation fails
 
                 return {"status": "success", "message": "Payment captured.", "order": updated_order.data}
             except Exception as processing_error:

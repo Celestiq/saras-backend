@@ -1,5 +1,5 @@
 # app/api/routes/cart.py
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status
 from supabase import Client
 from openai import OpenAI
 
@@ -9,6 +9,7 @@ from app.services.chapter_service import ChapterService
 from app.services.email_service import EmailService
 from app.services.user_service import UserService
 from app.services.pdf_service import PDFService
+from app.services.cloud_tasks_service import CloudTasksService
 from app.domain.models import CartItemAdd, CartItemUpdate, CheckoutRequest, CartResponse
 from app.api.deps import current_user
 from app.core.logging import get_logger
@@ -41,6 +42,10 @@ def get_email_service() -> EmailService:
 def get_user_service(supabase: Client = Depends(get_supabase)) -> UserService:
     """Dependency to provide a UserService instance."""
     return UserService(supabase=supabase)
+
+def get_cloud_tasks_service() -> CloudTasksService:
+    """Dependency to provide a CloudTasksService instance."""
+    return CloudTasksService()
 
 # --- Helper Functions ---
 
@@ -160,105 +165,6 @@ async def handle_non_subscription_completion(
         log.error(f"[BG Task] Error in handle_non_subscription_completion for book_id: {book_id}. Error: {e}", exc_info=True)
         raise
 
-# --- Worker Function for Background Task ---
-
-def trigger_chapter_generation_sync(
-    order: dict,
-    chapter_service: ChapterService,
-    supabase: Client
-):
-    """
-    Synchronous wrapper for the async trigger_chapter_generation function.
-    """
-    import asyncio
-    asyncio.run(trigger_chapter_generation(order, chapter_service, supabase))
-
-async def trigger_chapter_generation(
-    order: dict,
-    chapter_service: ChapterService,
-    supabase: Client
-):
-    """
-    This function is executed in the background after the checkout response is sent.
-    It iterates through the items of a completed order and generates all chapters.
-    """
-    order_id = order.get("id")
-    user_id = order.get("user_id")
-    order_items = order.get("order_items", [])
-    failures_detected = False
-
-    try:
-        log.info(f"[BG Task] Updating order {order_id} status to 'generating'.")
-        supabase.table("orders").update({"status": "generating"}).eq("id", order_id).execute()
-    except Exception as e:
-        log.error(f"[BG Task] Failed to update order {order_id} status to 'generating'. Error: {e}", exc_info=True)
-    
-    # Update all books to 'generating' status
-    try:
-        log.info(f"[BG Task] Updating all books in order {order_id} to 'generating' status.")
-        chapter_service.update_books_status_for_order(order_items, "generating")
-    except Exception as e:
-        log.error(f"[BG Task] Failed to update books status to 'generating' for order {order_id}. Error: {e}", exc_info=True)
-    
-    log.info(f"[BG Task] Starting chapter generation for order_id: {order_id} with {len(order_items)} item(s).")
-    
-    for item in order_items:
-        book_id = item.get("book_id")
-        if not book_id:
-            log.warning(f"[BG Task] Skipping item with no book_id in order {order_id}.")
-            continue
-        
-        try:
-            log.info(f"[BG Task] Generating all chapters for book_id: {book_id} from order {order_id}.")
-            chapter_service.generate_all_chapters(
-                user_id=user_id,
-                wish_id=None,
-                book_id=book_id
-            )
-            log.info(f"[BG Task] Successfully generated all chapters for book_id: {book_id}.")
-            
-            # Update this specific book to 'completed' status
-            try:
-                chapter_service.update_book_status(book_id, "completed")
-                log.info(f"[BG Task] Successfully updated book_id: {book_id} status to 'completed'.")
-                
-                # Check if this is a non-subscription book and handle PDF generation + email
-                try:
-                    await handle_non_subscription_completion(
-                        order_id=order_id,
-                        book_id=book_id,
-                        user_id=user_id,
-                        supabase=supabase
-                    )
-                except Exception as pdf_email_error:
-                    log.error(f"[BG Task] Failed to handle PDF generation/email for book_id: {book_id}. Error: {pdf_email_error}", exc_info=True)
-                    # Don't mark the entire order as failed for PDF/email issues
-                    
-            except Exception as e:
-                log.error(f"[BG Task] Failed to update book_id: {book_id} status to 'completed'. Error: {e}", exc_info=True)
-                failures_detected = True
-                
-        except Exception as e:
-            log.error(f"[BG Task] Failed to generate chapters for book_id: {book_id} in order {order_id}. Error: {e}", exc_info=True)
-            failures_detected = True
-            
-            # Update this specific book to 'failed' status
-            try:
-                chapter_service.update_book_status(book_id, "failed")
-                log.info(f"[BG Task] Updated book_id: {book_id} status to 'failed' due to generation error.")
-            except Exception as update_error:
-                log.error(f"[BG Task] Failed to update book_id: {book_id} status to 'failed'. Error: {update_error}", exc_info=True)
-
-    final_status = "failed" if failures_detected else "completed"
-    log.info(f"[BG Task] All generation tasks finished for order {order_id}. Setting final status to '{final_status}'.")
-    try:
-        supabase.table("orders").update({"status": final_status}).eq("id", order_id).execute()
-        log.info(f"[BG Task] Successfully updated order {order_id} to status '{final_status}'.")
-    except Exception as e:
-        log.error(f"[BG Task] CRITICAL: Failed to update final status for order {order_id}. Error: {e}", exc_info=True)
-
-    log.info(f"[BG Task] Finished processing order_id: {order_id}.")
-
 # --- API Routes ---
 
 @router.get("", response_model=CartResponse, summary="Get the current user's cart")
@@ -346,14 +252,13 @@ def remove_item(
 @router.post("/checkout", summary="Checkout and trigger content generation")
 def checkout_cart(
     body: CheckoutRequest,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(current_user),
     cart_service: CartService = Depends(get_cart_service),
-    chapter_service: ChapterService = Depends(get_chapter_service),
+    cloud_tasks_service: CloudTasksService = Depends(get_cloud_tasks_service),
     supabase: Client = Depends(get_supabase)
 ):
     """
-    Processes checkout, updates order status, and triggers a background task
+    Processes checkout, updates order status, and triggers a Cloud Task
     to generate all chapters for the purchased books.
     """
     user_id = user.get("id")
@@ -363,15 +268,15 @@ def checkout_cart(
         final_order = cart_service.checkout(user_id=user_id, time_to_send=body.time_to_send)
         log.info(f"User {user_id} successfully checked out order_id: {final_order.get('id')}")
 
-        # Add the long-running job to the background
-        background_tasks.add_task(
-            trigger_chapter_generation_sync,
-            order=final_order,
-            chapter_service=chapter_service,
-            supabase=supabase
-        )
-        
-        log.info(f"Enqueued chapter generation task for order_id: {final_order.get('id')}")
+        # Create Cloud Task for chapter generation
+        try:
+            order_id = final_order.get('id')
+            task_name = cloud_tasks_service.create_chapter_generation_task(order_id=order_id)
+            log.info(f"Created Cloud Task for chapter generation: {task_name} for order_id: {order_id}")
+        except Exception as task_error:
+            log.error(f"Failed to create Cloud Task for order_id: {final_order.get('id')}. Error: {task_error}", exc_info=True)
+            # Don't fail the checkout if task creation fails - the order is already processed
+            # We could implement a fallback mechanism here if needed
 
         return {"message": "Checkout successful. Content generation has started.", "order": final_order}
     except HTTPException as e:
@@ -385,11 +290,10 @@ def checkout_cart(
 @router.post("/checkout/credits", summary="Checkout using credits")
 def checkout_with_credits(
     body: CheckoutRequest,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(current_user),
     cart_service: CartService = Depends(get_cart_service),
-    chapter_service: ChapterService = Depends(get_chapter_service),
     email_service: EmailService = Depends(get_email_service),
+    cloud_tasks_service: CloudTasksService = Depends(get_cloud_tasks_service),
     supabase: Client = Depends(get_supabase)
 ):
     """
@@ -412,16 +316,14 @@ def checkout_with_credits(
             log.error(f"[API_CREDIT_CHECKOUT] Failed to send confirmation email for order {order_id}: {email_error}")
             # Don't fail the whole process if email fails
 
-        # Add the long-running job to the background
-        log.debug(f"[API_CREDIT_CHECKOUT] Enqueuing chapter generation task for order_id: {order_id}")
-        background_tasks.add_task(
-            trigger_chapter_generation_sync,
-            order=final_order,
-            chapter_service=chapter_service,
-            supabase=supabase
-        )
-        
-        log.info(f"[API_CREDIT_CHECKOUT] Successfully enqueued chapter generation task for order_id: {order_id}")
+        # Create Cloud Task for chapter generation
+        log.debug(f"[API_CREDIT_CHECKOUT] Creating Cloud Task for chapter generation, order_id: {order_id}")
+        try:
+            task_name = cloud_tasks_service.create_chapter_generation_task(order_id=order_id)
+            log.info(f"[API_CREDIT_CHECKOUT] Created Cloud Task for chapter generation: {task_name} for order_id: {order_id}")
+        except Exception as task_error:
+            log.error(f"[API_CREDIT_CHECKOUT] Failed to create Cloud Task for order_id: {order_id}. Error: {task_error}", exc_info=True)
+            # Don't fail the checkout if task creation fails - the order is already processed
 
         return {"message": "Credit checkout successful. Content generation has started.", "order": final_order}
     except HTTPException as e:
