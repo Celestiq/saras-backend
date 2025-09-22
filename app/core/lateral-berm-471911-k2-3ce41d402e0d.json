@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "lateral-berm-471911-k2",
+  "private_key_id": "3ce41d402e0d4a32728fd5fdd97c68abcadec772",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC7IeHKJ0QkppkQ\n11xyeqdx4IHywLi16DlnQ8+bGrLqjzricaekBzlgZZypdcQPQ0W6RijlAwCpNJr8\nSzhXwCU+xJkIigPk5wwTsVSRN8elmiNV/En9YjH6wl2fb6HYELG2F+l37GJ7Moqy\nVb6q44eCHbvVzv+BLHFv8Nof/NTqocfUgWu7xkc8Sv8nYlfU8S5hraoQZejO3+zt\ns2xWsdgMie11Yc0cQyJRuCyOePUUn2TV5dJhnRk2zuRaP0wOSAerOf5PSxS5S+7g\nWEVRaiEB8sbB3N9jMPIzEVKYWa7h619GGZPGxh573LpPmaGQoytWQKEu53zyM0Qj\nnGFrlh4pAgMBAAECggEAAvlPXsiP9ysknJVnlTQozBD+z65LYSyvGNqFhpf+hua+\nz1FyEhPBUCxdOH40Hu/5QDQUO0t4a7f3zJGfdBmMHfq+2dljpXQch4WWa/ZgeFvC\nOwAW5u10EOGc3kdGYaomQNgRcEPz7rRHav0c2hdilGlHjmbLPbDInrhLpx17/ryL\nbep8yuo7oW6it3NtQrTYKkzw8HJy4Nov/xZnvjJa1vXfl7YnowmvodrhQ0OG9X5e\nBcLr6iAGx5jrrn8Qz6GRvj4XxXgSvMYtRlZAsVxF6/Mf7tRsYXUvutHP5zr2/ycQ\nILio0WyibLsAl+P36lU8Gskg+tiIbgmcWF/GbrHTgQKBgQD5S524uMOrjEF4jyCw\nFGhSqN0vHpSby0lPD0xQk6HsC6qSJrZCD+SmynuVYtLshXf+UAZCApWr4WUo/TUA\nc415NIUPrsT7/h13sdDMu30rE1DUs2vPXJHiNb1jsn7xGViAz9khqodQkx7/j6Pb\neDlXkwlaWyeluoKCwwSGpIbHoQKBgQDAKkbzb2bCmzOkzor5cpclbRT/05yeqxWb\n9SnSvAhqgzd2cn73xGS1Z2cVuMn9AGMgMVUDRVuDjEzIKlhC1IVfMY34MrCRs7So\n8+Y4KI2k4vIa3sq6RWgUiQ3y0fol2cPWR9kT02Cjir2mX/XST65rqVmAGshAxWJA\nVh38ViypiQKBgHmC6fXH2VgcnSzuVrh8ufzQYj89YKIvjCQFCOWdkCdF6HYkeGHq\n7UB/IY3HBZhT1hEXYHV8XQfSbUR1Zwg5SpPxjYn/XfSWADb/bQ7dtDzyxUtnyPzh\n2hmwqAeYUVejSwg+R0+plxsnGszmbq/jAdA10zE/jSuypTqnY+Vc/HUBAoGAWZ5d\n4IH/xppjB2Vb4uHSI54vwO+Lh2P6e/VmP+V5d1MitpbHJ/3rib5jkPnRGbDoicb4\nAsKB32O7G07EQsaiPLb7otjhB9JrWrAEmgQvqso8ZtOocB6WX51bZ/cNVkGs125C\nisB1vU+jCsiN+Ds4+PTNzLSw16Q2IhMHgPsfcSECgYBhjTTWw4wb7HDm7cBC1TWm\nTtk/FYqbbNZCmwt8e8YIPMgXzkqstLRgxrGmsbkS+6/DUckWLUEDp8qLelHIORcp\n1ra2NGuMJXm2XAx/ZQMaPFk9BNhIair8G48pGV+Sz1j086JNj67zzJe+wpjmv+m/\nYIi+IVZOrnf8xztMpR5z9g==\n-----END PRIVATE KEY-----\n",
+  "client_email": "task-invoker@lateral-berm-471911-k2.iam.gserviceaccount.com",
+  "client_id": "104264208743220818298",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/task-invoker%40lateral-berm-471911-k2.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

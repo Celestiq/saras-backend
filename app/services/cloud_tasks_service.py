@@ -75,11 +75,13 @@ class CloudTasksService:
                 )
                 task["schedule_time"] = timestamp
             
+            log.debug(f"Creating Cloud Task with payload: {task_payload} and delay: {delay_seconds} seconds")
             # Submit the task
             response = self.client.create_task(
                 request={"parent": self.parent, "task": task}
             )
             
+            log.debug(f"Cloud Task creation response: {response}")
             task_name = response.name
             log.info(f"Created Cloud Task for chapter generation: {task_name} for order_id: {order_id}")
             
@@ -88,6 +90,91 @@ class CloudTasksService:
         except Exception as e:
             log.error(f"Failed to create Cloud Task for order_id: {order_id}. Error: {e}", exc_info=True)
             raise Exception(f"Failed to create chapter generation task: {str(e)}")
+    
+    def create_single_chapter_generation_task(
+        self,
+        order_id: str,
+        book_id: str,
+        user_id: str,
+        chapter_idx: int,
+        module_index: int,
+        topic_index: int,
+        chapter_title: str,
+        delay_seconds: int = 0
+    ) -> str:
+        """
+        Create a Cloud Task for generating a single chapter.
+        
+        Args:
+            order_id: The order ID this chapter belongs to
+            book_id: The book ID this chapter belongs to
+            user_id: The user ID who owns this order
+            chapter_idx: The chapter index within the book
+            module_index: The module index in the roadmap
+            topic_index: The topic index within the module
+            chapter_title: The title of the chapter
+            delay_seconds: Optional delay before task execution (default: 0)
+            
+        Returns:
+            str: The task name/ID
+        """
+        try:
+            # Prepare the task payload for single chapter generation
+            task_payload = {
+                "order_id": order_id,
+                "book_id": book_id,
+                "user_id": user_id,
+                "chapter_idx": chapter_idx,
+                "module_index": module_index,
+                "topic_index": topic_index,
+                "chapter_title": chapter_title
+            }
+            
+            # Create the task
+            task = {
+                "http_request": {
+                    "http_method": tasks_v2.HttpMethod.POST,
+                    "url": f"{settings.BACKEND_URL}/tasks/generate-single-chapter",
+                    "headers": {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {settings.JOB_RUNNER_SECRET}"
+                    },
+                    "body": json.dumps(task_payload).encode("utf-8"),
+                },
+            }
+            
+            # Add service account email if configured (for authentication)
+            if settings.CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL:
+                task["http_request"]["oidc_token"] = {
+                    "service_account_email": settings.CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL,
+                    "audience": f"{settings.BACKEND_URL}/tasks/generate-single-chapter"
+                }
+            
+            # Add delay if specified
+            if delay_seconds > 0:
+                timestamp = timestamp_pb2.Timestamp()
+                timestamp.FromDatetime(
+                    datetime.now(timezone.utc).replace(
+                        microsecond=0
+                    ) + timezone.timedelta(seconds=delay_seconds)
+                )
+                task["schedule_time"] = timestamp
+            
+            log.debug(f"Creating single chapter Cloud Task with payload: {task_payload} and delay: {delay_seconds} seconds")
+            # Submit the task
+            response = self.client.create_task(
+                request={"parent": self.parent, "task": task}
+            )
+            
+            log.debug(f"Single chapter Cloud Task creation response: {response}")
+            task_name = response.name
+            log.info(f"Created Cloud Task for single chapter generation: {task_name} for book_id: {book_id}, chapter_idx: {chapter_idx}")
+            
+            return task_name
+            
+        except Exception as e:
+            log.error(f"Failed to create single chapter Cloud Task for book_id: {book_id}, chapter_idx: {chapter_idx}. Error: {e}", exc_info=True)
+            raise Exception(f"Failed to create single chapter generation task: {str(e)}")
     
     def create_retry_task(
         self,
