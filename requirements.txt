@@ -8,6 +8,7 @@ supabase
 openai
 requests
 python-jose[cryptography]
+PyJWT[crypto]
 xhtml2pdf
 markdown2
 pydantic[email]

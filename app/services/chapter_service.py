@@ -192,7 +192,11 @@ class ChapterService:
         return payload
 
     def generate_all_chapters(self, *, user_id: str, wish_id: Optional[str], book_id: str) -> dict:
-        log.info(f"Starting 'generate_all_chapters' process for book_id: {book_id}")
+        """
+        Legacy method for backward compatibility. 
+        Generates all chapters sequentially (non-parallel approach).
+        """
+        log.info(f"Starting 'generate_all_chapters' process for book_id: {book_id} (sequential mode)")
         book, roadmap = self._load_book_and_roadmap(book_id)
         idx = 1
         results: List[dict] = []
@@ -207,3 +211,119 @@ class ChapterService:
                 idx += 1
         log.info(f"Successfully completed 'generate_all_chapters' for book_id: {book_id}. Total chapters: {len(results)}")
         return {"count": len(results), "chapters": results}
+    
+    def prepare_chapters_for_parallel_generation(self, *, user_id: str, order_id: str, book_id: str) -> List[dict]:
+        """
+        Prepare chapters in the database for parallel generation.
+        Creates chapter rows with content_path=null and returns chapter info for task creation.
+        
+        Args:
+            user_id: The user ID
+            order_id: The order ID this book belongs to  
+            book_id: The book ID to prepare chapters for
+            
+        Returns:
+            List of chapter info dicts for Cloud Task creation
+        """
+        log.info(f"Preparing chapters for parallel generation - book_id: {book_id}, order_id: {order_id}")
+        
+        try:
+            book, roadmap = self._load_book_and_roadmap(book_id)
+            
+            idx = 1
+            chapter_tasks = []
+            
+            for mi, module in enumerate(roadmap.get("modules", [])):
+                for ti, topic in enumerate(module.get("topics", [])):
+                    title = topic.get("title", f"Chapter {idx}")
+                    
+                    # Create/ensure chapter row exists in database
+                    chapter_row = self._ensure_chapter_row(book_id, idx, title)
+                    chapter_id = chapter_row["id"]
+                    
+                    # Prepare task info for this chapter
+                    task_info = {
+                        "chapter_id": chapter_id,
+                        "order_id": order_id,
+                        "book_id": book_id,
+                        "user_id": user_id,
+                        "module_index": mi,
+                        "topic_index": ti,
+                        "idx": idx,
+                        "title": title
+                    }
+                    chapter_tasks.append(task_info)
+                    
+                    log.info(f"Prepared chapter {idx} (ID: {chapter_id}) for parallel generation")
+                    idx += 1
+            
+            log.info(f"Successfully prepared {len(chapter_tasks)} chapters for parallel generation - book_id: {book_id}")
+            return chapter_tasks
+            
+        except Exception as e:
+            log.error(f"Failed to prepare chapters for parallel generation - book_id: {book_id}. Error: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to prepare chapters for generation: {str(e)}"
+            )
+    
+    def check_all_chapters_completed(self, book_id: str) -> dict:
+        """
+        Check if all chapters for a book have been generated (content_path is not null).
+        
+        Args:
+            book_id: The book ID to check
+            
+        Returns:
+            Dict with completion status information
+        """
+        try:
+            log.info(f"Checking chapter completion status for book_id: {book_id}")
+            
+            # Get all chapters for this book
+            chapters_response = self.sb.table("chapters").select("id, idx, content_path, status").eq("book_id", book_id).order("idx").execute()
+            chapters = chapters_response.data
+            
+            if not chapters:
+                log.warning(f"No chapters found for book_id: {book_id}")
+                return {
+                    "book_id": book_id,
+                    "total_chapters": 0,
+                    "completed_chapters": 0,
+                    "failed_chapters": 0,
+                    "all_completed": True,  # No chapters means "complete"
+                    "completion_percentage": 100.0
+                }
+            
+            total_chapters = len(chapters)
+            completed_chapters = 0
+            failed_chapters = 0
+            
+            for chapter in chapters:
+                if chapter.get("content_path"):  # Chapter has content
+                    completed_chapters += 1
+                elif chapter.get("status") == "failed":
+                    failed_chapters += 1
+            
+            all_completed = (completed_chapters + failed_chapters) == total_chapters
+            completion_percentage = (completed_chapters / total_chapters) * 100 if total_chapters > 0 else 0
+            
+            result = {
+                "book_id": book_id,
+                "total_chapters": total_chapters,
+                "completed_chapters": completed_chapters,
+                "failed_chapters": failed_chapters,
+                "pending_chapters": total_chapters - completed_chapters - failed_chapters,
+                "all_completed": all_completed,
+                "completion_percentage": completion_percentage
+            }
+            
+            log.info(f"Chapter completion status for book_id {book_id}: {completed_chapters}/{total_chapters} completed, {failed_chapters} failed")
+            return result
+            
+        except Exception as e:
+            log.error(f"Failed to check chapter completion for book_id: {book_id}. Error: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to check chapter completion: {str(e)}"
+            )
