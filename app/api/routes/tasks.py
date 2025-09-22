@@ -835,8 +835,11 @@ async def handle_completion_monitoring_task(
             log.info(f"[Completion Monitor] All chapters completed for order {order_id}, starting final processing")
             
             try:
-                # Update order status to completed
-                supabase.table("orders").update({"status": "completed"}).eq("id", order_id).execute()
+                # Update order status to completed and clear monitoring task ID
+                supabase.table("orders").update({
+                    "status": "completed",
+                    "monitoring_task_id": None
+                }).eq("id", order_id).execute()
                 
                 # Update all books in the order to completed status
                 for item in order_items:
@@ -868,8 +871,11 @@ async def handle_completion_monitoring_task(
                 
             except Exception as processing_error:
                 log.error(f"[Completion Monitor] Failed final processing for order {order_id}. Error: {processing_error}", exc_info=True)
-                # Mark order as failed
-                supabase.table("orders").update({"status": "failed"}).eq("id", order_id).execute()
+                # Mark order as failed and clear monitoring task ID
+                supabase.table("orders").update({
+                    "status": "failed",
+                    "monitoring_task_id": None
+                }).eq("id", order_id).execute()
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Final processing failed"
@@ -878,7 +884,10 @@ async def handle_completion_monitoring_task(
         elif failed_chapters > 0 and (completed_chapters + failed_chapters) == total_chapters:
             # Some chapters failed but all processing is done
             log.warning(f"[Completion Monitor] Order {order_id} completed with {failed_chapters} failed chapters")
-            supabase.table("orders").update({"status": "completed_with_errors"}).eq("id", order_id).execute()
+            supabase.table("orders").update({
+                "status": "completed_with_errors",
+                "monitoring_task_id": None
+            }).eq("id", order_id).execute()
             
             # Still trigger processing for completed chapters
             for item in order_items:

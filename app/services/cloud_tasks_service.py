@@ -9,6 +9,7 @@ from google.oauth2 import service_account
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.db.supabase import get_supabase
 
 log = get_logger(__name__)
 
@@ -262,15 +263,27 @@ class CloudTasksService:
     ) -> str:
         """
         Create a Cloud Task to monitor chapter completion and trigger final processing.
+        Includes deduplication to prevent multiple monitoring tasks for the same order.
         
         Args:
             order_id: The order ID to monitor
             delay_seconds: Delay before checking completion (default: 1 minute)
             
         Returns:
-            str: The task name/ID
+            str: The task name/ID, or existing task name if already exists
         """
         try:
+            # Get database connection
+            supabase = get_supabase()
+            
+            # Check if a monitoring task already exists for this order
+            existing_order = supabase.table("orders").select("monitoring_task_id").eq("id", order_id).single().execute()
+            
+            if existing_order.data and existing_order.data.get("monitoring_task_id"):
+                existing_task_id = existing_order.data["monitoring_task_id"]
+                log.info(f"Completion monitoring task already exists for order {order_id}: {existing_task_id}")
+                return existing_task_id
+            
             # Prepare the task payload for completion monitoring
             task_payload = {
                 "order_id": order_id
@@ -310,6 +323,15 @@ class CloudTasksService:
             )
             
             task_name = response.name
+            
+            # Update the order with the monitoring task ID to prevent duplicates
+            try:
+                supabase.table("orders").update({"monitoring_task_id": task_name}).eq("id", order_id).execute()
+                log.info(f"Updated order {order_id} with monitoring task ID: {task_name}")
+            except Exception as update_error:
+                log.warning(f"Failed to update order {order_id} with monitoring task ID: {update_error}")
+                # Don't fail the entire operation if we can't update the database
+            
             log.info(f"Created completion monitoring Cloud Task: {task_name} for order_id: {order_id}")
             
             return task_name
@@ -317,6 +339,25 @@ class CloudTasksService:
         except Exception as e:
             log.error(f"Failed to create completion monitoring Cloud Task for order_id: {order_id}. Error: {e}", exc_info=True)
             raise Exception(f"Failed to create completion monitoring task: {str(e)}")
+    
+    def clear_monitoring_task_id(self, order_id: str) -> bool:
+        """
+        Clear the monitoring_task_id from an order to allow new monitoring tasks to be created.
+        
+        Args:
+            order_id: The order ID to clear the monitoring task ID for
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            supabase = get_supabase()
+            supabase.table("orders").update({"monitoring_task_id": None}).eq("id", order_id).execute()
+            log.info(f"Cleared monitoring task ID for order {order_id}")
+            return True
+        except Exception as e:
+            log.error(f"Failed to clear monitoring task ID for order {order_id}. Error: {e}", exc_info=True)
+            return False
     
     def get_queue_info(self) -> Dict[str, Any]:
         """
