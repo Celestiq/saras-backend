@@ -13,6 +13,7 @@ from app.services.cloud_tasks_service import CloudTasksService
 from app.domain.models import CartItemAdd, CartItemUpdate, CheckoutRequest, CartResponse
 from app.api.deps import current_user
 from app.core.logging import get_logger
+from app.api.helpers.task_helpers import handle_non_subscription_completion
 
 # Instantiate the logger for this specific module
 log = get_logger(__name__)
@@ -48,122 +49,6 @@ def get_cloud_tasks_service() -> CloudTasksService:
     return CloudTasksService()
 
 # --- Helper Functions ---
-
-async def handle_non_subscription_completion(
-    order_id: str,
-    book_id: str, 
-    user_id: str,
-    supabase: Client
-):
-    """
-    Handles PDF generation and email sending for non-subscription books.
-    """
-    try:
-        # Check if this book is a subscription in the order_items table
-        try:
-            order_item_response = supabase.table("order_items").select("subscription").eq("order_id", order_id).eq("book_id", book_id).execute()
-            
-            if not order_item_response.data or len(order_item_response.data) == 0:
-                log.warning(f"[BG Task] No order item found for book_id: {book_id} in order: {order_id}")
-                return
-                
-            is_subscription = order_item_response.data[0].get("subscription", True)
-            log.info(f"[BG Task] Order item subscription status for book_id: {book_id} is: {is_subscription}")
-            
-        except Exception as e:
-            log.error(f"[BG Task] Error fetching order item for book_id: {book_id}, order_id: {order_id}. Error: {e}", exc_info=True)
-            return
-        
-        if is_subscription:
-            log.info(f"[BG Task] Book_id: {book_id} is a subscription, skipping PDF generation and email.")
-            return
-            
-        log.info(f"[BG Task] Book_id: {book_id} is not a subscription, proceeding with PDF generation and email.")
-        
-        # Get user email from profiles table with fallback to auth.users
-        user_email = None
-        
-        try:
-            # First try to get email from profiles table
-            profile_response = supabase.table("profiles").select("email").eq("user_id", user_id).execute()
-            
-            if profile_response.data and len(profile_response.data) > 0 and profile_response.data[0].get("email"):
-                user_email = profile_response.data[0]["email"]
-                log.info(f"[BG Task] Found email in profiles table for user_id: {user_id}")
-            else:
-                log.warning(f"[BG Task] No email found in profiles table for user_id: {user_id}, trying auth.users")
-                
-                # Fallback to auth.users table
-                auth_response = supabase.auth.admin.get_user_by_id(user_id)
-                if auth_response and hasattr(auth_response, 'user') and auth_response.user and auth_response.user.email:
-                    user_email = auth_response.user.email
-                    log.info(f"[BG Task] Found email in auth.users table for user_id: {user_id}")
-                else:
-                    log.error(f"[BG Task] No email found in either profiles or auth.users for user_id: {user_id}")
-                    return
-                    
-        except Exception as e:
-            log.error(f"[BG Task] Error fetching user email for user_id: {user_id}. Error: {e}", exc_info=True)
-            return
-            
-        if not user_email:
-            log.error(f"[BG Task] No email found for user_id: {user_id}")
-            return
-        
-        # Get book title for PDF generation
-        book_title = "SARAS eBook"  # Default title
-        try:
-            book_response = supabase.table("books").select("generated_title").eq("id", book_id).execute()
-            if book_response.data and len(book_response.data) > 0 and book_response.data[0].get("generated_title"):
-                book_title = book_response.data[0]["generated_title"]
-                log.info(f"[BG Task] Found book title: {book_title} for book_id: {book_id}")
-            else:
-                log.warning(f"[BG Task] No book title found for book_id: {book_id}, using default")
-        except Exception as e:
-            log.error(f"[BG Task] Error fetching book title for book_id: {book_id}. Error: {e}", exc_info=True)
-            # Continue with default title
-        
-        # Generate PDF using the PDF service directly
-        try:
-            pdf_service = PDFService(supabase)
-            pdf_result = pdf_service.create_book_pdf(
-                book_id=book_id,
-                book_title=book_title,
-                subscription=False
-            )
-            log.info(f"[BG Task] PDF generated successfully for book_id: {book_id}. PDF URL: {pdf_result.get('storage_url')}")
-        except Exception as e:
-            log.error(f"[BG Task] PDF generation failed for book_id: {book_id}. Error: {e}", exc_info=True)
-            return
-        
-        # Send email with PDF attachment using the email service directly
-        try:
-            email_service = EmailService()
-            email_result = email_service.send_email_with_attachment(
-                recipient_email=user_email,
-                subject=f"Your Book: {book_title}",
-                html_content=f"""
-                <html>
-                <body>
-                    <h2>Your Book is Ready!</h2>
-                    <p>Hello!</p>
-                    <p>Your book "{book_title}" has been generated and is ready for download. Please find the PDF attached to this email.</p>
-                    <p>Thank you for using our service!</p>
-                    <br>
-                    <p>Best regards,<br>The Team</p>
-                </body>
-                </html>
-                """,
-                attachment_path=pdf_result.get("storage_url")
-            )
-            log.info(f"[BG Task] Email sent successfully to {user_email} for book_id: {book_id}")
-        except Exception as e:
-            log.error(f"[BG Task] Email sending failed for book_id: {book_id}. Error: {e}", exc_info=True)
-            return
-        
-    except Exception as e:
-        log.error(f"[BG Task] Error in handle_non_subscription_completion for book_id: {book_id}. Error: {e}", exc_info=True)
-        raise
 
 # --- API Routes ---
 
