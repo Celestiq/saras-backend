@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
 from typing import Dict, Any, Optional
 from pydantic import BaseModel
 from supabase import Client
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import jwt
 import os
@@ -35,6 +35,13 @@ class SingleChapterTaskPayload(BaseModel):
 
 class CompletionMonitoringTaskPayload(BaseModel):
     order_id: str
+
+class PDFGenerationTaskPayload(BaseModel):
+    """Payload for PDF generation tasks."""
+    order_id: str
+    book_id: str
+    user_id: str
+    book_title: str
 
 # --- Dependencies ---
 def get_chapter_service(supabase: Client = Depends(get_supabase)) -> ChapterService:
@@ -239,45 +246,22 @@ async def handle_non_subscription_completion(
             log.error(f"[Cloud Task] Error fetching book title for book_id: {book_id}. Error: {e}", exc_info=True)
             # Continue with default title
         
-        # Generate PDF using the PDF service directly
+        # Create PDF generation task instead of synchronous PDF generation
         try:
-            from app.services.pdf_service import PDFService
-            pdf_service = PDFService(supabase)
-            pdf_result = pdf_service.create_book_pdf(
+            from app.services.cloud_tasks_service import CloudTasksService
+            cloud_tasks_service = CloudTasksService()
+            
+            pdf_task_name = cloud_tasks_service.create_pdf_generation_task(
+                order_id=order_id,
                 book_id=book_id,
+                user_id=user_id,
                 book_title=book_title,
-                subscription=False
+                delay_seconds=5  # Small delay to ensure all chapters are fully processed
             )
-            log.info(f"[Cloud Task] PDF generated successfully for book_id: {book_id}. PDF URL: {pdf_result.get('storage_url')}")
-        except Exception as e:
-            log.error(f"[Cloud Task] PDF generation failed for book_id: {book_id}. Error: {e}", exc_info=True)
-            return
-        
-        # Send email with PDF attachment using the email service directly
-        try:
-            from app.services.email_service import EmailService
-            email_service = EmailService()
-            email_result = email_service.send_email_with_attachment(
-                recipient_email=user_email,
-                subject=f"Your Book: {book_title}",
-                html_content=f"""
-                <html>
-                <body>
-                    <h2>Your Book is Ready!</h2>
-                    <p>Hello!</p>
-                    <p>Your book "{book_title}" has been generated and is ready for download. Please find the PDF attached to this email.</p>
-                    <p>Thank you for using our service!</p>
-                    <br>
-                    <p>Best regards,<br>The Team</p>
-                </body>
-                </html>
-                """,
-                attachment_path=pdf_result.get("storage_url")
-            )
-            log.info(f"[Cloud Task] Email sent successfully to {user_email} for book_id: {book_id}")
-        except Exception as e:
-            log.error(f"[Cloud Task] Email sending failed for book_id: {book_id}. Error: {e}", exc_info=True)
-            return
+            log.info(f"[Cloud Task] Created PDF generation task: {pdf_task_name} for book_id: {book_id}")
+            
+        except Exception as pdf_task_error:
+            log.error(f"[Cloud Task] Error creating PDF generation task for book_id: {book_id}: {pdf_task_error}", exc_info=True)
         
     except Exception as e:
         log.error(f"[Cloud Task] Error in handle_non_subscription_completion for book_id: {book_id}. Error: {e}", exc_info=True)
@@ -364,15 +348,7 @@ async def process_chapter_generation_task(
             # Create individual Cloud Tasks for each chapter
             for task_info in chapter_tasks:
                 try:
-                    # Check if this chapter already has content_path (already generated)
-                    chapter_check = supabase.table("chapters").select("content_path").eq("id", task_info["chapter_id"]).single().execute()
-                    
-                    if chapter_check.data and chapter_check.data.get("content_path"):
-                        log.info(f"[Cloud Task] Chapter {task_info['idx']} (ID: {task_info['chapter_id']}) already has content, skipping task creation")
-                        continue
-                    
-                    log.debug(f"[Cloud Task] Chapter {task_info['idx']} (ID: {task_info['chapter_id']}) has no content_path, creating generation task")
-                    
+                    # Use the enhanced duplicate prevention in create_individual_chapter_task
                     task_name = cloud_tasks_service.create_individual_chapter_task(
                         chapter_id=task_info["chapter_id"],
                         order_id=task_info["order_id"],
@@ -382,8 +358,19 @@ async def process_chapter_generation_task(
                         topic_index=task_info["topic_index"],
                         idx=task_info["idx"]
                     )
-                    total_tasks_created += 1
-                    log.info(f"[Cloud Task] Created individual chapter task: {task_name} for chapter {task_info['idx']} (ID: {task_info['chapter_id']})")
+                    
+                    # Check if task creation was skipped due to duplicate prevention
+                    if task_name.startswith("already_completed_"):
+                        log.info(f"[Cloud Task] Chapter {task_info['idx']} (ID: {task_info['chapter_id']}) already completed, skipped task creation")
+                        continue
+                    elif task_name.startswith("projects/"):
+                        # Valid Cloud Task ID was created
+                        total_tasks_created += 1
+                        log.info(f"[Cloud Task] Created individual chapter task: {task_name} for chapter {task_info['idx']} (ID: {task_info['chapter_id']})")
+                    else:
+                        # Existing task ID was returned (duplicate prevention)
+                        log.info(f"[Cloud Task] Chapter {task_info['idx']} (ID: {task_info['chapter_id']}) already being processed, using existing task: {task_name}")
+                        total_tasks_created += 1
                     
                 except Exception as task_error:
                     log.error(f"[Cloud Task] Failed to create individual task for chapter {task_info['idx']} (ID: {task_info['chapter_id']}). Error: {task_error}", exc_info=True)
@@ -422,14 +409,14 @@ async def process_chapter_generation_task(
             # This is critical - without monitoring, the order might stay in "generating" status forever
             # Fall back to marking as failed
             try:
-                supabase.table("orders").update({"status": "failed", "error_message": "Failed to create completion monitoring"}).eq("id", order_id).execute()
+                supabase.table("orders").update({"status": "failed", "error_message": "Failed to create completion monitoring", "generation_task_id": None}).eq("id", order_id).execute()
             except Exception as fallback_error:
                 log.error(f"[Cloud Task] Failed to update order status as fallback. Error: {fallback_error}", exc_info=True)
     else:
         # No tasks were created, mark order as failed
         log.error(f"[Cloud Task] No chapter generation tasks were created for order {order_id}.")
         try:
-            supabase.table("orders").update({"status": "failed", "error_message": "No chapters could be prepared for generation"}).eq("id", order_id).execute()
+            supabase.table("orders").update({"status": "failed", "error_message": "No chapters could be prepared for generation", "generation_task_id": None}).eq("id", order_id).execute()
         except Exception as e:
             log.error(f"[Cloud Task] Failed to mark order as failed. Error: {e}", exc_info=True)
 
@@ -612,7 +599,7 @@ async def handle_chapter_generation_task(
         
         # Mark order as failed if we've exceeded retries or can't create retry task
         try:
-            supabase.table("orders").update({"status": "failed"}).eq("id", order_id).execute()
+            supabase.table("orders").update({"status": "failed", "generation_task_id": None}).eq("id", order_id).execute()
             log.info(f"[Cloud Task Handler] Marked order {order_id} as failed after {retry_count + 1} attempts")
         except Exception as update_error:
             log.error(f"[Cloud Task Handler] Failed to mark order {order_id} as failed. Error: {update_error}", exc_info=True)
@@ -702,7 +689,7 @@ async def handle_chapter_generation_task_legacy(
         
         # Mark order as failed if we've exceeded retries or can't create retry task
         try:
-            supabase.table("orders").update({"status": "failed"}).eq("id", order_id).execute()
+            supabase.table("orders").update({"status": "failed", "generation_task_id": None}).eq("id", order_id).execute()
             log.info(f"[Cloud Task Handler Legacy] Marked order {order_id} as failed after {retry_count + 1} attempts")
         except Exception as update_error:
             log.error(f"[Cloud Task Handler Legacy] Failed to mark order {order_id} as failed. Error: {update_error}", exc_info=True)
@@ -719,6 +706,7 @@ async def handle_single_chapter_generation_task(
     request: Request,
     _: bool = Depends(verify_task_authorization),
     chapter_service: ChapterService = Depends(get_chapter_service),
+    cloud_tasks_service: CloudTasksService = Depends(get_cloud_tasks_service),
     supabase: Client = Depends(get_supabase)
 ):
     """
@@ -736,6 +724,34 @@ async def handle_single_chapter_generation_task(
     log.info(f"[Single Chapter Task] Processing chapter_id: {chapter_id}, idx: {idx} for order_id: {order_id}")
     
     try:
+        # Check if chapter is already being processed by another task
+        try:
+            chapter_check = supabase.table("chapters").select("status, content_path, generation_task_id").eq("id", chapter_id).single().execute()
+            if chapter_check.data:
+                chapter_data = chapter_check.data
+                current_status = chapter_data.get("status")
+                content_path = chapter_data.get("content_path")
+                
+                # If chapter already has content, skip processing
+                if content_path:
+                    log.warning(f"[Single Chapter Task] Chapter {chapter_id} (idx: {idx}) already has content, skipping generation")
+                    return {
+                        "status": "skipped",
+                        "message": f"Chapter {idx} already completed",
+                        "chapter_id": chapter_id,
+                        "order_id": order_id
+                    }
+                
+                # If chapter is not in generating status, update it
+                if current_status != "generating":
+                    supabase.table("chapters").update({
+                        "status": "generating",
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("id", chapter_id).execute()
+                    log.info(f"[Single Chapter Task] Updated chapter {chapter_id} status to 'generating'")
+        except Exception as status_error:
+            log.warning(f"[Single Chapter Task] Failed to check/update chapter status: {status_error}")
+        
         # Generate content for this specific chapter
         result = chapter_service.generate_chapter(
             user_id=user_id,
@@ -746,7 +762,27 @@ async def handle_single_chapter_generation_task(
             topic_index=topic_index
         )
         
+        # Update chapter status to completed and clear generation task ID
+        try:
+            supabase.table("chapters").update({
+                "status": "completed",
+                "generation_task_id": None,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }).eq("id", chapter_id).execute()
+            log.info(f"[Single Chapter Task] Updated chapter {chapter_id} status to 'completed' and cleared task ID")
+        except Exception as update_error:
+            log.warning(f"[Single Chapter Task] Failed to update chapter status: {update_error}")
+        
         log.info(f"[Single Chapter Task] Successfully generated chapter_id: {chapter_id} for order_id: {order_id}")
+        
+        # Trigger immediate completion check to avoid timing gaps
+        try:
+            log.info(f"[Single Chapter Task] Triggering immediate completion check for order_id: {order_id}")
+            await check_order_completion_immediately(order_id, supabase, cloud_tasks_service)
+        except Exception as completion_error:
+            log.warning(f"[Single Chapter Task] Failed to trigger immediate completion check for order_id: {order_id}. Error: {completion_error}")
+            # Don't fail the chapter generation if completion check fails
+        
         return {
             "status": "success",
             "message": f"Chapter {idx} generated successfully",
@@ -758,14 +794,15 @@ async def handle_single_chapter_generation_task(
     except Exception as e:
         log.error(f"[Single Chapter Task] Failed to generate chapter_id: {chapter_id}. Error: {e}", exc_info=True)
         
-        # Mark this specific chapter as failed
+        # Mark this specific chapter as failed and clear generation task ID
         try:
             supabase.table("chapters").update({
                 "status": "failed",
                 "error_message": str(e),
+                "generation_task_id": None,
                 "updated_at": datetime.now().isoformat()
             }).eq("id", chapter_id).execute()
-            log.info(f"[Single Chapter Task] Marked chapter_id: {chapter_id} as failed")
+            log.info(f"[Single Chapter Task] Marked chapter_id: {chapter_id} as failed and cleared task ID")
         except Exception as update_error:
             log.error(f"[Single Chapter Task] Failed to update chapter status for chapter_id: {chapter_id}. Error: {update_error}", exc_info=True)
         
@@ -773,6 +810,282 @@ async def handle_single_chapter_generation_task(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Chapter generation failed for chapter {chapter_id}: {str(e)}"
         )
+
+@router.post("/generate-pdf", summary="Cloud Tasks handler for PDF generation")
+async def handle_pdf_generation_task(
+    payload: PDFGenerationTaskPayload,
+    request: Request,
+    _: bool = Depends(verify_task_authorization),
+    supabase: Client = Depends(get_supabase)
+):
+    """
+    Handle PDF generation tasks from Google Cloud Tasks.
+    This endpoint generates PDF and sends completion email asynchronously.
+    """
+    order_id = payload.order_id
+    book_id = payload.book_id
+    user_id = payload.user_id
+    book_title = payload.book_title
+    
+    log.info(f"[PDF Generation Task] Processing PDF generation for book_id: {book_id}, order_id: {order_id}")
+    
+    try:
+        # Get user email from profiles table
+        user_email = None
+        user_name = "User"  # Default name
+        
+        try:
+            user_response = supabase.table("profiles").select("email, full_name").eq("user_id", user_id).single().execute()
+            if user_response.data:
+                user_email = user_response.data.get("email")
+                user_name = user_response.data.get("full_name", "User")
+                log.info(f"[PDF Generation Task] Found user email: {user_email} for user_id: {user_id}")
+            else:
+                log.error(f"[PDF Generation Task] No profile found for user_id: {user_id}")
+                return {"status": "error", "message": "User profile not found"}
+        except Exception as e:
+            log.error(f"[PDF Generation Task] Failed to fetch user profile for user_id: {user_id}. Error: {e}", exc_info=True)
+            return {"status": "error", "message": "Failed to fetch user profile"}
+        
+        if not user_email:
+            log.error(f"[PDF Generation Task] No email found for user_id: {user_id}")
+            return {"status": "error", "message": "No email found for user"}
+        
+        # Generate PDF using the PDF service
+        try:
+            from app.services.pdf_service import PDFService
+            pdf_service = PDFService(supabase)
+            
+            log.info(f"[PDF Generation Task] Starting PDF generation for book_id: {book_id}")
+            pdf_result = pdf_service.create_book_pdf(
+                book_id=book_id,
+                book_title=book_title,
+                subscription=False
+            )
+            
+            if pdf_result.get("status") == "success":
+                pdf_url = pdf_result.get("storage_url")
+                log.info(f"[PDF Generation Task] PDF generated successfully for book_id: {book_id}. URL: {pdf_url}")
+            else:
+                log.error(f"[PDF Generation Task] PDF generation failed for book_id: {book_id}. Result: {pdf_result}")
+                return {"status": "error", "message": "PDF generation failed"}
+                
+        except Exception as pdf_error:
+            log.error(f"[PDF Generation Task] PDF generation failed for book_id: {book_id}. Error: {pdf_error}", exc_info=True)
+            return {"status": "error", "message": f"PDF generation failed: {str(pdf_error)}"}
+        
+        # Send completion email with PDF
+        try:
+            from app.services.email_service import EmailService
+            email_service = EmailService()
+            
+            # Prepare email content
+            subject = f"Your Book: {book_title} is Ready!"
+            html_content = f"""
+            <html>
+            <body>
+                <h2>Your Book is Ready!</h2>
+                <p>Hello {user_name}!</p>
+                <p>Your book "{book_title}" has been generated and is ready for download. Please find the PDF attached to this email.</p>
+                <p>Thank you for using our service!</p>
+                <br>
+                <p>Best regards,<br>The SARAS Team</p>
+            </body>
+            </html>
+            """
+            
+            # Send email with PDF attachment
+            email_result = email_service.send_email_with_attachment(
+                recipient_email=user_email,
+                subject=subject,
+                html_content=html_content,
+                attachment_path=pdf_url
+            )
+            
+            if email_result.get("success", True):
+                log.info(f"[PDF Generation Task] Completion email with PDF sent successfully to {user_email} for order {order_id}")
+                
+                # Update order status to completed
+                try:
+                    supabase.table("orders").update({
+                        "status": "completed",
+                        "generation_task_id": None,
+                        "monitoring_task_id": None,
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("id", order_id).execute()
+                    log.info(f"[PDF Generation Task] Updated order {order_id} status to 'completed'")
+                except Exception as update_error:
+                    log.warning(f"[PDF Generation Task] Failed to update order status: {update_error}")
+                
+                return {
+                    "status": "success",
+                    "message": f"PDF generated and email sent successfully for book {book_title}",
+                    "book_id": book_id,
+                    "order_id": order_id,
+                    "pdf_url": pdf_url
+                }
+            else:
+                log.error(f"[PDF Generation Task] Failed to send completion email with PDF to {user_email} for order {order_id}. Result: {email_result}")
+                return {"status": "error", "message": "Failed to send completion email"}
+                
+        except Exception as email_error:
+            log.error(f"[PDF Generation Task] Error sending completion email with PDF for order {order_id}: {email_error}", exc_info=True)
+            return {"status": "error", "message": f"Email sending failed: {str(email_error)}"}
+        
+    except Exception as e:
+        log.error(f"[PDF Generation Task] Unexpected error during PDF generation for book_id: {book_id}. Error: {e}", exc_info=True)
+        return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+async def check_order_completion_immediately(
+    order_id: str,
+    supabase: Client,
+    cloud_tasks_service: CloudTasksService
+) -> dict:
+    """
+    Immediately check if an order is complete and trigger final processing if so.
+    This prevents timing gaps where the last chapter completes but the scheduled
+    monitoring task hasn't run yet.
+    """
+    log.info(f"[Immediate Completion Check] Checking completion status for order_id: {order_id}")
+    
+    try:
+        # Get all chapters for this order
+        order_response = supabase.table("orders").select("*, order_items(*)").eq("id", order_id).single().execute()
+        if not order_response.data:
+            log.error(f"[Immediate Completion Check] Order not found: {order_id}")
+            return {"status": "error", "message": "Order not found"}
+        
+        order_data = order_response.data
+        order_items = order_data.get("order_items", [])
+        user_id = order_data.get("user_id")
+        
+        if not order_items:
+            log.warning(f"[Immediate Completion Check] No order items found for order_id: {order_id}")
+            return {"status": "no_items", "message": "No items to process"}
+        
+        # Check completion status for all books in the order
+        all_completed = True
+        total_chapters = 0
+        completed_chapters = 0
+        failed_chapters = 0
+        
+        for item in order_items:
+            book_id = item.get("book_id")
+            if not book_id:
+                continue
+                
+            # Get all chapters for this book
+            chapters_response = supabase.table("chapters").select("id, content_path, status").eq("book_id", book_id).execute()
+            book_chapters = chapters_response.data
+            
+            for chapter in book_chapters:
+                total_chapters += 1
+                if chapter.get("content_path"):  # Chapter has been generated
+                    completed_chapters += 1
+                elif chapter.get("status") == "failed":
+                    failed_chapters += 1
+                else:
+                    all_completed = False
+        
+        log.info(f"[Immediate Completion Check] Order {order_id}: {completed_chapters}/{total_chapters} chapters completed, {failed_chapters} failed")
+        
+        if all_completed and total_chapters > 0:
+            # All chapters are complete, trigger final processing
+            log.info(f"[Immediate Completion Check] All chapters completed for order {order_id}, starting final processing")
+            
+            try:
+                # Update order status to completed and clear monitoring task ID
+                supabase.table("orders").update({
+                    "status": "completed",
+                    "monitoring_task_id": None,
+                    "generation_task_id": None
+                }).eq("id", order_id).execute()
+                
+                # Update all books in the order to completed status
+                for item in order_items:
+                    book_id = item.get("book_id")
+                    if book_id:
+                        try:
+                            supabase.table("books").update({"status": "completed"}).eq("id", book_id).execute()
+                            log.info(f"[Immediate Completion Check] Updated book_id: {book_id} status to 'completed'")
+                            
+                            # Handle PDF generation and email for non-subscription books
+                            await handle_non_subscription_completion(
+                                order_id=order_id,
+                                book_id=book_id,
+                                user_id=user_id,
+                                supabase=supabase
+                            )
+                        except Exception as book_error:
+                            log.error(f"[Immediate Completion Check] Failed to process book_id: {book_id}. Error: {book_error}", exc_info=True)
+                
+                log.info(f"[Immediate Completion Check] Successfully completed final processing for order {order_id}")
+                return {
+                    "status": "completed",
+                    "message": "All chapters completed, final processing done",
+                    "order_id": order_id,
+                    "total_chapters": total_chapters,
+                    "completed_chapters": completed_chapters,
+                    "failed_chapters": failed_chapters
+                }
+                
+            except Exception as processing_error:
+                log.error(f"[Immediate Completion Check] Failed final processing for order {order_id}. Error: {processing_error}", exc_info=True)
+                # Mark order as failed and clear monitoring task ID
+                supabase.table("orders").update({
+                    "status": "failed",
+                    "monitoring_task_id": None
+                }).eq("id", order_id).execute()
+                return {
+                    "status": "error",
+                    "message": "Final processing failed",
+                    "error": str(processing_error)
+                }
+        
+        else:
+            # Not all chapters are complete yet
+            log.info(f"[Immediate Completion Check] Order {order_id} not yet complete ({completed_chapters}/{total_chapters} chapters done)")
+            return {
+                "status": "in_progress",
+                "message": "Order not yet complete",
+                "order_id": order_id,
+                "total_chapters": total_chapters,
+                "completed_chapters": completed_chapters,
+                "failed_chapters": failed_chapters
+            }
+            
+    except Exception as e:
+        log.error(f"[Immediate Completion Check] Error checking completion for order {order_id}. Error: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Error checking completion",
+            "error": str(e)
+        }
+
+
+@router.post("/trigger-completion-check", summary="Manually trigger completion check for an order")
+async def trigger_completion_check(
+    order_id: str,
+    request: Request,
+    _: bool = Depends(verify_task_authorization),
+    cloud_tasks_service: CloudTasksService = Depends(get_cloud_tasks_service),
+    supabase: Client = Depends(get_supabase)
+):
+    """
+    Manually trigger a completion check for a specific order.
+    This can be used to fix stuck orders or test completion logic.
+    """
+    log.info(f"[Manual Trigger] Manually triggering completion check for order_id: {order_id}")
+    
+    result = await check_order_completion_immediately(order_id, supabase, cloud_tasks_service)
+    
+    return {
+        "status": "success",
+        "message": "Completion check triggered",
+        "order_id": order_id,
+        "result": result
+    }
+
 
 @router.post("/monitor-completion", summary="Cloud Tasks handler for monitoring chapter completion")
 async def handle_completion_monitoring_task(
@@ -838,7 +1151,8 @@ async def handle_completion_monitoring_task(
                 # Update order status to completed and clear monitoring task ID
                 supabase.table("orders").update({
                     "status": "completed",
-                    "monitoring_task_id": None
+                    "monitoring_task_id": None,
+                    "generation_task_id": None
                 }).eq("id", order_id).execute()
                 
                 # Update all books in the order to completed status
@@ -886,7 +1200,8 @@ async def handle_completion_monitoring_task(
             log.warning(f"[Completion Monitor] Order {order_id} completed with {failed_chapters} failed chapters")
             supabase.table("orders").update({
                 "status": "completed_with_errors",
-                "monitoring_task_id": None
+                "monitoring_task_id": None,
+                "generation_task_id": None
             }).eq("id", order_id).execute()
             
             # Still trigger processing for completed chapters
@@ -926,7 +1241,7 @@ async def handle_completion_monitoring_task(
             
             try:
                 # Schedule another monitoring task with exponential backoff
-                next_check_delay = min(300, 60 * 2)  # Start with 2 minutes, max 5 minutes
+                next_check_delay = min(300, 30)  # Start with 30 seconds, max 5 minutes
                 task_name = cloud_tasks_service.create_completion_monitoring_task(
                     order_id=order_id,
                     delay_seconds=next_check_delay

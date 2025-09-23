@@ -49,6 +49,79 @@ class PDFService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
                 detail=f"Failed to download markdown file: {path_in_bucket}"
             )
+    
+    def _download_chapters_parallel(self, chapters: List[dict]) -> List[dict]:
+        """
+        Downloads all chapter markdown content in parallel for better performance.
+        
+        Args:
+            chapters: List of chapter dictionaries with idx and book_id
+            
+        Returns:
+            List[dict]: List of chapters with downloaded content
+        """
+        import concurrent.futures
+        from typing import Tuple
+        
+        def download_single_chapter(chapter: dict) -> dict:
+            """Download a single chapter's content."""
+            try:
+                path_in_bucket = f"books/{chapter['book_id']}/chapters/{chapter['idx']}.md"
+                content = self._download_markdown_content(path_in_bucket)
+                return {
+                    **chapter,
+                    "content": content,
+                    "download_success": True
+                }
+            except Exception as e:
+                log.error(f"Failed to download chapter {chapter['idx']}: {e}")
+                return {
+                    **chapter,
+                    "content": "",
+                    "download_success": False,
+                    "error": str(e)
+                }
+        
+        try:
+            log.info(f"Starting parallel download of {len(chapters)} chapters")
+            
+            # Use ThreadPoolExecutor for parallel downloads
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                # Submit all download tasks
+                future_to_chapter = {
+                    executor.submit(download_single_chapter, chapter): chapter 
+                    for chapter in chapters
+                }
+                
+                # Collect results as they complete
+                downloaded_chapters = []
+                for future in concurrent.futures.as_completed(future_to_chapter):
+                    try:
+                        result = future.result()
+                        downloaded_chapters.append(result)
+                    except Exception as e:
+                        chapter = future_to_chapter[future]
+                        log.error(f"Failed to download chapter {chapter['idx']}: {e}")
+                        downloaded_chapters.append({
+                            **chapter,
+                            "content": "",
+                            "download_success": False,
+                            "error": str(e)
+                        })
+            
+            # Sort by chapter index to maintain order
+            downloaded_chapters.sort(key=lambda x: x['idx'])
+            
+            successful_downloads = sum(1 for ch in downloaded_chapters if ch.get('download_success', False))
+            log.info(f"Parallel download completed: {successful_downloads}/{len(chapters)} chapters downloaded successfully")
+            
+            return downloaded_chapters
+            
+        except Exception as e:
+            log.error(f"Error during parallel chapter download: {e}", exc_info=True)
+            # Fallback to sequential download
+            log.info("Falling back to sequential download")
+            return [download_single_chapter(chapter) for chapter in chapters]
 
     def _convert_html_to_pdf(self, html_string: str) -> bytes:
         """
@@ -148,20 +221,48 @@ class PDFService:
                 detail="No chapters found for this book"
             )
 
+        # Use parallel downloads for better performance
+        try:
+            downloaded_chapters = self._download_chapters_parallel(chapters)
+        except Exception as e:
+            log.error(f"Parallel download failed, falling back to sequential: {e}")
+            # Fallback to sequential download
+            downloaded_chapters = []
+            for chapter in chapters:
+                chapter_index = chapter.get("idx")
+                if chapter_index is None:
+                    log.warning(f"Skipping chapter {chapter.get('id')} due to missing index ('idx').")
+                    continue
+                
+                markdown_path = f"books/{book_id}/chapters/{chapter_index}.md"
+                try:
+                    markdown_content = self._download_markdown_content(markdown_path)
+                    downloaded_chapters.append({
+                        **chapter,
+                        "content": markdown_content,
+                        "download_success": True
+                    })
+                except HTTPException as e:
+                    log.error(f"Could not download chapter {chapter.get('id')} from path {markdown_path}: {e.detail}")
+                    downloaded_chapters.append({
+                        **chapter,
+                        "content": "",
+                        "download_success": False,
+                        "error": str(e)
+                    })
+
+        # Process downloaded chapters into HTML fragments
         html_fragments = []
-        for chapter in chapters:
-            chapter_index = chapter.get("idx")
-            if chapter_index is None:
-                log.warning(f"Skipping chapter {chapter.get('id')} due to missing index ('idx').")
+        for chapter in downloaded_chapters:
+            if not chapter.get("download_success", False):
+                log.warning(f"Skipping chapter {chapter.get('id')} due to download failure: {chapter.get('error', 'Unknown error')}")
                 continue
-            
-            markdown_path = f"books/{book_id}/chapters/{chapter_index}.md"
+                
             try:
-                markdown_content = self._download_markdown_content(markdown_path)
-                html_fragment = convert_markdown_to_styled_html(markdown_content, as_fragment=as_fragment)
+                html_fragment = convert_markdown_to_styled_html(chapter["content"], as_fragment=as_fragment)
                 html_fragments.append(html_fragment)
-            except HTTPException as e:
-                log.error(f"Could not process chapter {chapter.get('id')} from path {markdown_path}: {e.detail}")
+            except Exception as e:
+                log.error(f"Could not process chapter {chapter.get('id')} content: {e}")
 
         if not html_fragments:
             raise HTTPException(
@@ -204,24 +305,47 @@ class PDFService:
     def create_book_pdf(self, book_id: str, book_title: str = "My Book", subscription: bool = True) -> dict:
         """
         Orchestrates the creation of a book PDF from markdown chapters and uploads to storage.
+        Includes timeout handling and error recovery.
 
         Args:
             book_id: The ID of the book to generate PDF for
             book_title: The title of the book (optional, defaults to "My Book")
+            subscription: Whether this is a subscription book
 
         Returns:
             Dict containing the storage URL and metadata
         """
+        import signal
+        import time
+        
         log.info(f"Starting PDF generation for book_id: {book_id}")
+        start_time = time.time()
+        
+        def timeout_handler(signum, frame):
+            raise TimeoutError("PDF generation timed out after 300 seconds")
         
         try:
+            # Set up timeout handler (5 minutes)
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(300)  # 5 minutes timeout
+            
+            # Step 1: Build HTML from chapters (with parallel downloads)
+            log.info(f"Building HTML for book_id: {book_id}")
             final_html_for_pdf = self._build_book_html(book_id, book_title, not subscription)
             
-            # Step 1: Convert the assembled HTML to PDF bytes
+            # Step 2: Convert HTML to PDF bytes
+            log.info(f"Converting HTML to PDF for book_id: {book_id}")
             pdf_bytes = self._convert_html_to_pdf(final_html_for_pdf)
             
-            # Step 2: Upload the generated PDF bytes to storage
+            # Step 3: Upload PDF to storage
+            log.info(f"Uploading PDF to storage for book_id: {book_id}")
             storage_url = self._upload_pdf_to_storage(book_id, pdf_bytes)
+            
+            # Cancel timeout
+            signal.alarm(0)
+            
+            generation_time = time.time() - start_time
+            log.info(f"PDF generation completed for book_id: {book_id} in {generation_time:.2f} seconds")
             
             return {
                 "status": "success",
@@ -229,12 +353,22 @@ class PDFService:
                 "book_id": book_id,
                 "book_title": book_title,
                 "storage_url": storage_url,
-                "file_size_bytes": len(pdf_bytes)
+                "file_size_bytes": len(pdf_bytes),
+                "generation_time_seconds": generation_time
             }
             
+        except TimeoutError as e:
+            signal.alarm(0)  # Cancel timeout
+            log.error(f"PDF generation timed out for book_id: {book_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_408_REQUEST_TIMEOUT,
+                detail=f"PDF generation timed out after 5 minutes: {str(e)}"
+            )
         except HTTPException:
+            signal.alarm(0)  # Cancel timeout
             raise
         except Exception as e:
+            signal.alarm(0)  # Cancel timeout
             log.error(f"Unexpected error while creating PDF for book {book_id}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
