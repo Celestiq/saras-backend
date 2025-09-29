@@ -6,9 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install build tools only in builder stage (kept minimal)
+# Install build tools and Cairo dependencies for xhtml2pdf
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc git curl \
+    pkg-config libcairo2-dev libpango1.0-dev libpangocairo-1.0-0 \
   && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements from repo root (adjust path if yours differs)
