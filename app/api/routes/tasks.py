@@ -369,24 +369,107 @@ async def handle_pdf_generation_task(
             log.error(f"[PDF Generation Task] No email found for user_id: {user_id}")
             return {"status": "error", "message": "No email found for user"}
         
-        # Generate PDF using the PDF service
+        # Check if PDF already exists (idempotency check)
         try:
-            from app.services.pdf_service import PDFService
-            pdf_service = PDFService(supabase)
-            
-            log.info(f"[PDF Generation Task] Starting PDF generation for book_id: {book_id}")
-            pdf_result = pdf_service.create_book_pdf(
-                book_id=book_id,
-                book_title=book_title,
-                subscription=False
-            )
-            
-            if pdf_result.get("status") == "success":
-                pdf_url = pdf_result.get("storage_url")
-                log.info(f"[PDF Generation Task] PDF generated successfully for book_id: {book_id}. URL: {pdf_url}")
+            book_response = supabase.table("books").select("pdf_url, pdf_generation_task_id").eq("id", book_id).execute()
+            if book_response.data and len(book_response.data) > 0:
+                book_data = book_response.data[0]
+                existing_pdf_url = book_data.get("pdf_url")
+                existing_task_id = book_data.get("pdf_generation_task_id")
+                
+                if existing_pdf_url:
+                    log.info(f"[PDF Generation Task] PDF already exists for book_id: {book_id} with URL: {existing_pdf_url}. Skipping generation.")
+                    pdf_url = existing_pdf_url
+                elif existing_task_id:
+                    # Check if the existing task is still valid (not a stale claim)
+                    if existing_task_id.startswith("task_"):
+                        # This is a temporary claim that might be stale, check if it's recent
+                        try:
+                            # Extract timestamp from task ID (format: task_timestamp_bookid)
+                            timestamp_str = existing_task_id.split("_")[1]
+                            claim_time = float(timestamp_str)
+                            current_time = datetime.now(timezone.utc).timestamp()
+ 
+                            # If claim is older than 2 minutes, consider it stale and retry
+                            if current_time - claim_time > 120:  # 2 minutes
+                                log.warning(f"[PDF Generation Task] Stale PDF generation claim for book_id: {book_id} (age: {current_time - claim_time:.1f}s). Retrying.")
+                                # Clear the stale claim and proceed
+                                supabase.table("books").update({
+                                    "pdf_generation_task_id": None,
+                                    "updated_at": datetime.now(timezone.utc).isoformat()
+                                }).eq("id", book_id).execute()
+                            else:
+                                log.info(f"[PDF Generation Task] PDF generation already in progress for book_id: {book_id} with task_id: {existing_task_id}. Processing anyway to ensure completion.")
+                                # Don't skip - process anyway to ensure the PDF gets generated
+                        except (ValueError, IndexError) as e:
+                            log.warning(f"[PDF Generation Task] Invalid task ID format for book_id: {book_id}: {existing_task_id}. Clearing and retrying.")
+                            # Clear invalid task ID and proceed
+                            supabase.table("books").update({
+                                "pdf_generation_task_id": None,
+                                "updated_at": datetime.now(timezone.utc).isoformat()
+                            }).eq("id", book_id).execute()
+                    else:
+                        log.info(f"[PDF Generation Task] PDF generation already in progress for book_id: {book_id} with task_id: {existing_task_id}. Processing anyway to ensure completion.")
+                        # Don't skip - process anyway to ensure the PDF gets generated
+                else:
+                    # Try to atomically claim this PDF generation task to prevent race conditions
+                    try:
+                        # Update the book to set a temporary task ID to claim this generation
+                        claim_result = supabase.table("books").update({
+                            "pdf_generation_task_id": f"task_{datetime.now(timezone.utc).timestamp()}_{book_id}",
+                            "updated_at": datetime.now(timezone.utc).isoformat()
+                        }).eq("id", book_id).eq("pdf_generation_task_id", None).execute()
+                        
+                        if not claim_result.data or len(claim_result.data) == 0:
+                            log.info(f"[PDF Generation Task] Another task already claimed PDF generation for book_id: {book_id}. Processing anyway to ensure completion.")
+                            # Don't skip - process anyway to ensure the PDF gets generated
+                            
+                    except Exception as claim_error:
+                        log.warning(f"[PDF Generation Task] Failed to claim PDF generation for book_id: {book_id}. Error: {claim_error}. Proceeding anyway.")
+                    
+                    # Final idempotency check - check if PDF was generated by another task while we were processing
+                    final_check = supabase.table("books").select("pdf_url").eq("id", book_id).execute()
+                    if final_check.data and len(final_check.data) > 0:
+                        existing_pdf_url = final_check.data[0].get("pdf_url")
+                        if existing_pdf_url:
+                            log.info(f"[PDF Generation Task] PDF was generated by another task while processing book_id: {book_id}. Using existing URL: {existing_pdf_url}")
+                            pdf_url = existing_pdf_url
+                        else:
+                            # Generate PDF using the PDF service
+                            from app.services.pdf_service import PDFService
+                            pdf_service = PDFService(supabase)
+                            
+                            log.info(f"[PDF Generation Task] Starting PDF generation for book_id: {book_id}")
+                            pdf_result = pdf_service.create_book_pdf(
+                                book_id=book_id,
+                                book_title=book_title,
+                                subscription=False
+                            )
+                            
+                            if pdf_result.get("status") == "success":
+                                pdf_url = pdf_result.get("storage_url")
+                                log.info(f"[PDF Generation Task] PDF generated successfully for book_id: {book_id}. URL: {pdf_url}")
+                                
+                                # Update the database with the PDF URL immediately to prevent duplicate generation
+                                try:
+                                    supabase.table("books").update({
+                                        "pdf_url": pdf_url,
+                                        "pdf_generation_task_id": None,
+                                        "updated_at": datetime.now(timezone.utc).isoformat()
+                                    }).eq("id", book_id).execute()
+                                    log.info(f"[PDF Generation Task] Updated book {book_id} with PDF URL: {pdf_url}")
+                                except Exception as update_error:
+                                    log.error(f"[PDF Generation Task] Failed to update book {book_id} with PDF URL: {update_error}")
+                                    # Continue with email sending even if DB update fails
+                            else:
+                                log.error(f"[PDF Generation Task] PDF generation failed for book_id: {book_id}. Result: {pdf_result}")
+                                return {"status": "error", "message": "PDF generation failed"}
+                    else:
+                        log.error(f"[PDF Generation Task] Book not found during final check for book_id: {book_id}")
+                        return {"status": "error", "message": "Book not found"}
             else:
-                log.error(f"[PDF Generation Task] PDF generation failed for book_id: {book_id}. Result: {pdf_result}")
-                return {"status": "error", "message": "PDF generation failed"}
+                log.error(f"[PDF Generation Task] Book not found for book_id: {book_id}")
+                return {"status": "error", "message": "Book not found"}
                 
         except Exception as pdf_error:
             log.error(f"[PDF Generation Task] PDF generation failed for book_id: {book_id}. Error: {pdf_error}", exc_info=True)

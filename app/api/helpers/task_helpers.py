@@ -81,6 +81,53 @@ async def handle_non_subscription_completion(
             log.error(f"[Cloud Task] Error fetching book title for book_id: {book_id}. Error: {e}", exc_info=True)
             # Continue with default title
         
+        # Check if PDF generation has already been triggered for this book (idempotency check)
+        try:
+            # Check if there's already a PDF generation task or completed PDF for this book
+            existing_pdf_response = supabase.table("books").select("pdf_generation_task_id, pdf_url").eq("id", book_id).execute()
+            
+            if existing_pdf_response.data and len(existing_pdf_response.data) > 0:
+                book_data = existing_pdf_response.data[0]
+                pdf_task_id = book_data.get("pdf_generation_task_id")
+                pdf_url = book_data.get("pdf_url")
+                
+                if pdf_url:
+                    log.info(f"[Cloud Task] PDF already exists for book_id: {book_id} with URL: {pdf_url}. Skipping PDF generation.")
+                    return
+                elif pdf_task_id:
+                    # Check if the task ID is a temporary claim that might be stale
+                    if pdf_task_id.startswith("task_"):
+                        try:
+                            # Extract timestamp from task ID (format: task_timestamp_bookid)
+                            timestamp_str = pdf_task_id.split("_")[1]
+                            claim_time = float(timestamp_str)
+                            current_time = datetime.now(timezone.utc).timestamp()
+                            
+                            # If claim is older than 5 minutes, consider it stale and retry
+                            if current_time - claim_time > 300:  # 5 minutes
+                                log.warning(f"[Cloud Task] Stale PDF generation claim for book_id: {book_id} (age: {current_time - claim_time:.1f}s). Retrying.")
+                                # Clear the stale claim and proceed
+                                supabase.table("books").update({
+                                    "pdf_generation_task_id": None,
+                                    "updated_at": datetime.now(timezone.utc).isoformat()
+                                }).eq("id", book_id).execute()
+                            else:
+                                log.info(f"[Cloud Task] PDF generation task already exists for book_id: {book_id} with task_id: {pdf_task_id}. Skipping duplicate task creation.")
+                                return
+                        except (ValueError, IndexError) as e:
+                            log.warning(f"[Cloud Task] Invalid task ID format for book_id: {book_id}: {pdf_task_id}. Clearing and retrying.")
+                            # Clear invalid task ID and proceed
+                            supabase.table("books").update({
+                                "pdf_generation_task_id": None,
+                                "updated_at": datetime.now(timezone.utc).isoformat()
+                            }).eq("id", book_id).execute()
+                    else:
+                        log.info(f"[Cloud Task] PDF generation task already exists for book_id: {book_id} with task_id: {pdf_task_id}. Skipping duplicate task creation.")
+                        return
+                    
+        except Exception as check_error:
+            log.warning(f"[Cloud Task] Error checking existing PDF for book_id: {book_id}. Error: {check_error}. Proceeding with PDF generation.")
+        
         # Create PDF generation task instead of synchronous PDF generation
         try:
             from app.services.cloud_tasks_service import CloudTasksService

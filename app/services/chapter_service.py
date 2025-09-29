@@ -167,6 +167,11 @@ class ChapterService:
         title = roadmap["modules"][module_index]["topics"][topic_index].get("title")
         row = self._ensure_chapter_row(book_id, idx, title)
 
+        # Check if chapter content already exists (idempotency check)
+        if row.get("content_path") and row.get("content_sha256"):
+            log.info(f"Chapter index {idx} for book {book_id} already exists with content_path: {row['content_path']}. Skipping generation.")
+            return {"chapter": row}
+
         try:
             md = self.generate_content_for_topic(roadmap, module_index, topic_index)
             saved = self._save_chapter_content(row["id"], book_id, idx, md)
