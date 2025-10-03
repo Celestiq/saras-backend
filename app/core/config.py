@@ -44,4 +44,6 @@ class Settings(BaseSettings):
     CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL: str | None = None
     GCP_SERVICE_ACCOUNT_KEY_PATH: str = "app/core/lateral-berm-471911-k2-abea3d585ba5.json"
 
+    CONTENT_GENERATION_SERVICE_URL: str
+
 settings = Settings()

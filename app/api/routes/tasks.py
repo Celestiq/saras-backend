@@ -4,6 +4,7 @@ from typing import Dict, Any, Optional
 from pydantic import BaseModel
 from supabase import Client
 from datetime import datetime, timezone
+from openai import OpenAI
 import json
 import os
 
@@ -45,10 +46,13 @@ class PDFGenerationTaskPayload(BaseModel):
     book_title: str
 
 # --- Dependencies ---
-def get_chapter_service(supabase: Client = Depends(get_supabase)) -> ChapterService:
+def get_openai_client() -> OpenAI:
+    """Dependency to provide an OpenAI client instance."""
+    return OpenAI()
+
+def get_chapter_service(supabase: Client = Depends(get_supabase), openai_client: OpenAI = Depends(get_openai_client)) -> ChapterService:
     """Dependency to provide a ChapterService instance."""
-    from openai import OpenAI
-    return ChapterService(supabase=supabase, openai_client=OpenAI())
+    return ChapterService(supabase=supabase, openai_client=openai_client)
 
 def get_cloud_tasks_service() -> CloudTasksService:
     """Dependency to provide a CloudTasksService instance."""

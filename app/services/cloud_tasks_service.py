@@ -104,7 +104,7 @@ class CloudTasksService:
             task = {
                 "http_request": {
                     "http_method": tasks_v2.HttpMethod.POST,
-                    "url": f"{settings.BACKEND_URL}/tasks/generate-chapters",
+                    "url": f"{settings.CONTENT_GENERATION_SERVICE_URL}/tasks/generate-chapters",
                     "headers": {
                         "Content-Type": "application/json"
                     },
@@ -116,7 +116,7 @@ class CloudTasksService:
             service_account_email = settings.CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL or "task-invoker@lateral-berm-471911-k2.iam.gserviceaccount.com"
             task["http_request"]["oidc_token"] = {
                 "service_account_email": service_account_email,
-                "audience": f"{settings.BACKEND_URL}/tasks/generate-chapters"
+                "audience": f"{settings.CONTENT_GENERATION_SERVICE_URL}/tasks/generate-chapters"
             }
             
             # Add delay if specified
@@ -183,7 +183,7 @@ class CloudTasksService:
             task = {
                 "http_request": {
                     "http_method": tasks_v2.HttpMethod.POST,
-                    "url": f"{settings.BACKEND_URL}/tasks/generate-chapters",
+                    "url": f"{settings.CONTENT_GENERATION_SERVICE_URL}/tasks/generate-chapters",
                     "headers": {
                         "Content-Type": "application/json"
                     },
@@ -195,7 +195,7 @@ class CloudTasksService:
             service_account_email = settings.CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL or "task-invoker@lateral-berm-471911-k2.iam.gserviceaccount.com"
             task["http_request"]["oidc_token"] = {
                 "service_account_email": service_account_email,
-                "audience": f"{settings.BACKEND_URL}/tasks/generate-chapters"
+                "audience": f"{settings.CONTENT_GENERATION_SERVICE_URL}/tasks/generate-chapters"
             }
             
             # Add delay
@@ -306,7 +306,7 @@ class CloudTasksService:
             task = {
                 "http_request": {
                     "http_method": tasks_v2.HttpMethod.POST,
-                    "url": f"{settings.BACKEND_URL}/tasks/generate-single-chapter",
+                    "url": f"{settings.CONTENT_GENERATION_SERVICE_URL}/tasks/generate-single-chapter",
                     "headers": {
                         "Content-Type": "application/json"
                     },
@@ -318,7 +318,7 @@ class CloudTasksService:
             service_account_email = settings.CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL or "task-invoker@lateral-berm-471911-k2.iam.gserviceaccount.com"
             task["http_request"]["oidc_token"] = {
                 "service_account_email": service_account_email,
-                "audience": f"{settings.BACKEND_URL}/tasks/generate-single-chapter"
+                "audience": f"{settings.CONTENT_GENERATION_SERVICE_URL}/tasks/generate-single-chapter"
             }
             
             # Add delay if specified
@@ -561,7 +561,7 @@ class CloudTasksService:
             task = {
                 "http_request": {
                     "http_method": tasks_v2.HttpMethod.POST,
-                    "url": f"{settings.BACKEND_URL}/tasks/generate-pdf",
+                    "url": f"{settings.CONTENT_GENERATION_SERVICE_URL}/tasks/generate-pdf",
                     "headers": {
                         "Content-Type": "application/json"
                     },
@@ -573,7 +573,7 @@ class CloudTasksService:
             service_account_email = settings.CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL or "task-invoker@lateral-berm-471911-k2.iam.gserviceaccount.com"
             task["http_request"]["oidc_token"] = {
                 "service_account_email": service_account_email,
-                "audience": f"{settings.BACKEND_URL}/tasks/generate-pdf"
+                "audience": f"{settings.CONTENT_GENERATION_SERVICE_URL}/tasks/generate-pdf"
             }
             
             # Add delay if specified

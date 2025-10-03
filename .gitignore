@@ -7,3 +7,4 @@ app.log
 **/.pytest_cache
 **/__pycache__
 **/*.pyc
+docker-compose.yml
