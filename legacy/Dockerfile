@@ -50,5 +50,8 @@ USER appuser
 
 EXPOSE 8080
 
-# Content generation service entrypoint
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app.main_content:app", "--bind", "0.0.0.0:8080"]
+# Legacy unified application entrypoint
+# For new deployments, use:
+# - Dockerfile.main-api for the main API service
+# - Dockerfile.content-generation for the content generation service
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--bind", "0.0.0.0:8080"]
