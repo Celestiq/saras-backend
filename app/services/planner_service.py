@@ -155,16 +155,40 @@ class RoadmapPlanner:
             path = f"{user_id}/{wish_id}/roadmap.json"
             content_url = self._upload_json(settings.APP_BUCKET_BOOKS, path, roadmap)
             
+            # Count the number of chapters (topics) in the roadmap
+            num_chapters = None
+            try:
+                if isinstance(roadmap, dict):
+                    chapter_count = 0
+                    for module in roadmap.get("modules", []):
+                        if isinstance(module, dict):
+                            topics = module.get("topics", [])
+                            if isinstance(topics, list):
+                                chapter_count += len(topics)
+                    num_chapters = chapter_count if chapter_count > 0 else None
+                    
+                if num_chapters is not None:
+                    log.info(f"Roadmap contains {num_chapters} chapters/topics for wish_id: {wish_id}")
+                else:
+                    log.warning(f"Could not determine chapter count from roadmap for wish_id: {wish_id}. Roadmap structure may be invalid.")
+            except Exception as count_error:
+                log.error(f"Error counting chapters in roadmap for wish_id: {wish_id}. Error: {count_error}")
+                num_chapters = None
+            
             book_payload = {
                 "wish_id": wish_id,
                 "title": topic,
                 "outline": roadmap.get("outline"),
                 "summary": roadmap.get("summary"),
                 "generated_title": roadmap.get("subject", topic),
-                "content_url": content_url
+                "content_url": content_url,
+                "num_chapters": num_chapters
             }
             book_row = self.sb.table("books").insert(book_payload).execute().data[0]
-            log.info(f"Created book record with id: {book_row['id']} for wish_id: {wish_id}")
+            if num_chapters is not None:
+                log.info(f"Created book record with id: {book_row['id']} for wish_id: {wish_id} with {num_chapters} expected chapters")
+            else:
+                log.info(f"Created book record with id: {book_row['id']} for wish_id: {wish_id} (chapter count unknown)")
 
         # 4. Log the LLM run
         llm_run_payload = {
@@ -264,15 +288,39 @@ class RoadmapPlanner:
             new_path = f"{user_id}/{new_wish_id}/roadmap.refined.{uuid.uuid4().hex[:8]}.json"
             new_content_url = self._upload_json(settings.APP_BUCKET_BOOKS, new_path, refined_roadmap)
             
+            # Count the number of chapters (topics) in the refined roadmap
+            num_chapters = None
+            try:
+                if isinstance(refined_roadmap, dict):
+                    chapter_count = 0
+                    for module in refined_roadmap.get("modules", []):
+                        if isinstance(module, dict):
+                            topics = module.get("topics", [])
+                            if isinstance(topics, list):
+                                chapter_count += len(topics)
+                    num_chapters = chapter_count if chapter_count > 0 else None
+                    
+                if num_chapters is not None:
+                    log.info(f"Refined roadmap contains {num_chapters} chapters/topics for new_wish_id: {new_wish_id}")
+                else:
+                    log.warning(f"Could not determine chapter count from refined roadmap for new_wish_id: {new_wish_id}. Roadmap structure may be invalid.")
+            except Exception as count_error:
+                log.error(f"Error counting chapters in refined roadmap for new_wish_id: {new_wish_id}. Error: {count_error}")
+                num_chapters = None
+            
             new_book_payload = {
                 "wish_id": new_wish_id, "title": refinement_topic,
                 "outline": refined_roadmap.get("outline"),
                 "summary": refined_roadmap.get("summary"),
                 "generated_title": refined_roadmap.get("subject", original_topic),
-                "content_url": new_content_url
+                "content_url": new_content_url,
+                "num_chapters": num_chapters
             }
             new_book_row = self.sb.table("books").insert(new_book_payload).execute().data[0]
-            log.info(f"Created new book record with id: {new_book_row['id']} for refined wish.")
+            if num_chapters is not None:
+                log.info(f"Created new book record with id: {new_book_row['id']} for refined wish with {num_chapters} expected chapters.")
+            else:
+                log.info(f"Created new book record with id: {new_book_row['id']} for refined wish (chapter count unknown)")
 
         # 5. Log the LLM run
         llm_run_payload = {

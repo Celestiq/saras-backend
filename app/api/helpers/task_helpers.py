@@ -186,11 +186,40 @@ async def check_order_completion_immediately(
             book_id = item.get("book_id")
             if not book_id:
                 continue
+            
+            # Get book metadata including expected chapter count
+            expected_chapters = None
+            try:
+                book_response = supabase.table("books").select("id, num_chapters").eq("id", book_id).single().execute()
+                book_data = book_response.data
+                expected_chapters = book_data.get("num_chapters") if book_data else None
+            except Exception as book_error:
+                log.warning(f"[Immediate Completion Check] Could not fetch book metadata for book_id: {book_id}. Error: {book_error}. Proceeding with chapter checks only.")
+                expected_chapters = None
                 
             # Get all chapters for this book
             chapters_response = supabase.table("chapters").select("id, content_path, status").eq("book_id", book_id).execute()
             book_chapters = chapters_response.data
             
+            # Critical check: If no chapters exist yet, book is not complete
+            if len(book_chapters) == 0:
+                if expected_chapters is not None:
+                    log.warning(f"[Immediate Completion Check] Book {book_id} has 0 chapters created (expected: {expected_chapters}). Marking as incomplete.")
+                else:
+                    log.warning(f"[Immediate Completion Check] Book {book_id} has 0 chapters created. Marking as incomplete.")
+                all_completed = False
+                continue
+            
+            # If we know the expected chapter count, verify it matches
+            if expected_chapters is not None and len(book_chapters) < expected_chapters:
+                log.warning(f"[Immediate Completion Check] Book {book_id} has {len(book_chapters)} chapters but expected {expected_chapters}. Marking as incomplete.")
+                all_completed = False
+                continue
+            elif expected_chapters is None and len(book_chapters) > 0:
+                # If we don't know the expected count but have some chapters, log it for visibility
+                log.info(f"[Immediate Completion Check] Book {book_id} has {len(book_chapters)} chapters")
+            
+            # Check each chapter's completion status
             for chapter in book_chapters:
                 total_chapters += 1
                 if chapter.get("content_path"):  # Chapter has been generated
