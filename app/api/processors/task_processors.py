@@ -56,19 +56,51 @@ async def process_chapter_generation_task(
     except Exception as e:
         log.error(f"[Cloud Task] Failed to update order {order_id} status to 'generating'. Error: {e}", exc_info=True)
     
-    # Update all books to 'generating' status
+    # Filter out already completed books (book-level duplicate prevention)
+    books_to_process = []
+    for item in order_items:
+        book_id = item.get("book_id")
+        if not book_id:
+            log.warning(f"[Cloud Task] Skipping item with no book_id in order {order_id}.")
+            continue
+        
+        # Check if book is already completed
+        try:
+            book_check = supabase.table("books").select("status").eq("id", book_id).single().execute()
+            if book_check.data:
+                book_status = book_check.data.get("status")
+                if book_status == "completed":
+                    log.info(f"[Cloud Task] BOOK-LEVEL DUPLICATE PREVENTION: Book {book_id} is already completed. Skipping generation.")
+                    continue
+                else:
+                    log.info(f"[Cloud Task] Book {book_id} status is '{book_status}', will proceed with generation.")
+        except Exception as status_check_error:
+            log.warning(f"[Cloud Task] Failed to check book status for book_id: {book_id}. Error: {status_check_error}. Proceeding with generation.")
+        
+        books_to_process.append(item)
+    
+    if not books_to_process:
+        log.info(f"[Cloud Task] All books in order {order_id} are already completed. No generation needed.")
+        # Update order status to completed since all books are done
+        try:
+            supabase.table("orders").update({"status": "completed", "generation_task_id": None}).eq("id", order_id).execute()
+        except Exception as e:
+            log.error(f"[Cloud Task] Failed to update order {order_id} status to 'completed'. Error: {e}", exc_info=True)
+        return
+    
+    # Update only non-completed books to 'generating' status
     try:
-        log.info(f"[Cloud Task] Updating all books in order {order_id} to 'generating' status.")
-        chapter_service.update_books_status_for_order(order_items, "generating")
+        log.info(f"[Cloud Task] Updating {len(books_to_process)} book(s) in order {order_id} to 'generating' status.")
+        chapter_service.update_books_status_for_order(books_to_process, "generating")
     except Exception as e:
         log.error(f"[Cloud Task] Failed to update books status to 'generating' for order {order_id}. Error: {e}", exc_info=True)
     
-    log.info(f"[Cloud Task] Starting parallel chapter preparation for order_id: {order_id} with {len(order_items)} item(s).")
+    log.info(f"[Cloud Task] Starting parallel chapter preparation for order_id: {order_id} with {len(books_to_process)} item(s).")
     
     total_tasks_created = 0
     
     # Phase 1: Prepare all chapters in database and create individual generation tasks
-    for item in order_items:
+    for item in books_to_process:
         book_id = item.get("book_id")
         if not book_id:
             log.warning(f"[Cloud Task] Skipping item with no book_id in order {order_id}.")
@@ -206,21 +238,53 @@ async def process_chapter_generation_task_legacy(
         raise
 
     try:
-        log.info(f"[Cloud Task] Updating order {order_id} status to 'generating'.")
+        log.info(f"[Cloud Task Legacy] Updating order {order_id} status to 'generating'.")
         supabase.table("orders").update({"status": "generating"}).eq("id", order_id).execute()
     except Exception as e:
-        log.error(f"[Cloud Task] Failed to update order {order_id} status to 'generating'. Error: {e}", exc_info=True)
+        log.error(f"[Cloud Task Legacy] Failed to update order {order_id} status to 'generating'. Error: {e}", exc_info=True)
     
-    # Update all books to 'generating' status
-    try:
-        log.info(f"[Cloud Task] Updating all books in order {order_id} to 'generating' status.")
-        chapter_service.update_books_status_for_order(order_items, "generating")
-    except Exception as e:
-        log.error(f"[Cloud Task] Failed to update books status to 'generating' for order {order_id}. Error: {e}", exc_info=True)
-    
-    log.info(f"[Cloud Task] Starting sequential chapter generation for order_id: {order_id} with {len(order_items)} item(s).")
-    
+    # Filter out already completed books (book-level duplicate prevention)
+    books_to_process = []
     for item in order_items:
+        book_id = item.get("book_id")
+        if not book_id:
+            log.warning(f"[Cloud Task Legacy] Skipping item with no book_id in order {order_id}.")
+            continue
+        
+        # Check if book is already completed
+        try:
+            book_check = supabase.table("books").select("status").eq("id", book_id).single().execute()
+            if book_check.data:
+                book_status = book_check.data.get("status")
+                if book_status == "completed":
+                    log.info(f"[Cloud Task Legacy] BOOK-LEVEL DUPLICATE PREVENTION: Book {book_id} is already completed. Skipping generation.")
+                    continue
+                else:
+                    log.info(f"[Cloud Task Legacy] Book {book_id} status is '{book_status}', will proceed with generation.")
+        except Exception as status_check_error:
+            log.warning(f"[Cloud Task Legacy] Failed to check book status for book_id: {book_id}. Error: {status_check_error}. Proceeding with generation.")
+        
+        books_to_process.append(item)
+    
+    if not books_to_process:
+        log.info(f"[Cloud Task Legacy] All books in order {order_id} are already completed. No generation needed.")
+        # Update order status to completed since all books are done
+        try:
+            supabase.table("orders").update({"status": "completed", "generation_task_id": None}).eq("id", order_id).execute()
+        except Exception as e:
+            log.error(f"[Cloud Task Legacy] Failed to update order {order_id} status to 'completed'. Error: {e}", exc_info=True)
+        return
+    
+    # Update only non-completed books to 'generating' status
+    try:
+        log.info(f"[Cloud Task Legacy] Updating {len(books_to_process)} book(s) in order {order_id} to 'generating' status.")
+        chapter_service.update_books_status_for_order(books_to_process, "generating")
+    except Exception as e:
+        log.error(f"[Cloud Task Legacy] Failed to update books status to 'generating' for order {order_id}. Error: {e}", exc_info=True)
+    
+    log.info(f"[Cloud Task] Starting sequential chapter generation for order_id: {order_id} with {len(books_to_process)} item(s).")
+    
+    for item in books_to_process:
         book_id = item.get("book_id")
         if not book_id:
             log.warning(f"[Cloud Task] Skipping item with no book_id in order {order_id}.")
