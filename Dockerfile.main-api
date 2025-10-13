@@ -51,4 +51,4 @@ USER appuser
 EXPOSE 8080
 
 # Main API service entrypoint
-CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "app.main_api:app", "--bind", "0.0.0.0:8080"]
+CMD ["uvicorn", "app.main_api:app", "--host", "0.0.0.0", "--port", "8080"]
